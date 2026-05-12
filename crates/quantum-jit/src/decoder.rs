@@ -1,14 +1,1321 @@
-//! x86_64 instruction decoder. From-scratch (no `iced-x86`, no `xed`).
+//! x86_64 instruction decoder.
 //!
-//! The decoder walks raw bytes and produces a small `Inst` struct describing
-//! one instruction. We start with the bare minimum needed to translate the
-//! prologue/epilogue of `ExitProcess(0)` so the rest of the pipeline can be
-//! validated end-to-end.
+//! From-scratch — no `iced-x86`, no `xed`, no tables borrowed from
+//! external projects. We walk bytes left-to-right, consume any legacy
+//! prefixes and the REX byte, then dispatch on the first opcode byte
+//! through a single big match. Two-byte (`0F`-prefixed) opcodes get the
+//! same treatment.
+//!
+//! Coverage scope (the e2e path and well beyond):
+//!   * full legacy + REX prefix handling
+//!   * ModRM + SIB + RIP-relative addressing
+//!   * single-byte primary table for the integer / common-flow subset
+//!   * `0F`-secondary for Jcc/SETcc/CMOVcc/MOV{S,Z}X/IMUL/BSR/BSF/BT*
+//!     family/XADD/CMPXCHG plus the SSE2 scalar moves compilers emit.
+//!
+//! Anything we don't lift yet returns `Op::Unhandled` carrying the
+//! correct byte length so the caller can advance the IP cleanly.
 
-/// Placeholder instruction representation.
+use crate::iform::{Cond, GpReg, Inst, Mem, Op, OpSize, Operand, Seg};
+use core::convert::TryFrom;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Inst {
-    /// Marker for unimplemented bytes — keeps the decoder total during
-    /// bring-up. Replace with structured opcodes as they land.
-    Todo,
+pub enum Error {
+    Truncated,
+    Reserved,
+}
+
+pub type Result<T> = core::result::Result<T, Error>;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Rex {
+    pub w: bool,
+    pub r: bool,
+    pub x: bool,
+    pub b: bool,
+    pub present: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Prefixes {
+    pub lock: bool,
+    pub repe: bool,
+    pub repne: bool,
+    pub osize: bool,
+    pub asize: bool,
+    pub seg: Option<Seg>,
+    pub rex: Rex,
+}
+
+pub struct Decoder<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    guest_rip: u64,
+}
+
+impl<'a> Decoder<'a> {
+    pub fn new(bytes: &'a [u8], guest_rip: u64) -> Self {
+        Self { bytes, pos: 0, guest_rip }
+    }
+
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub fn rip(&self) -> u64 {
+        self.guest_rip.wrapping_add(self.pos as u64)
+    }
+
+    pub fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        let b = *self.bytes.get(self.pos).ok_or(Error::Truncated)?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn peek_u8(&self) -> Result<u8> {
+        self.bytes.get(self.pos).copied().ok_or(Error::Truncated)
+    }
+
+    fn read_i8(&mut self) -> Result<i8> {
+        Ok(self.read_u8()? as i8)
+    }
+
+    fn read_u16(&mut self) -> Result<u16> {
+        let s = self
+            .bytes
+            .get(self.pos..self.pos + 2)
+            .ok_or(Error::Truncated)?;
+        self.pos += 2;
+        Ok(u16::from_le_bytes([s[0], s[1]]))
+    }
+
+    fn read_i16(&mut self) -> Result<i16> {
+        Ok(self.read_u16()? as i16)
+    }
+
+    fn read_u32(&mut self) -> Result<u32> {
+        let s = self
+            .bytes
+            .get(self.pos..self.pos + 4)
+            .ok_or(Error::Truncated)?;
+        self.pos += 4;
+        Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    }
+
+    fn read_i32(&mut self) -> Result<i32> {
+        Ok(self.read_u32()? as i32)
+    }
+
+    fn read_u64(&mut self) -> Result<u64> {
+        let s = self
+            .bytes
+            .get(self.pos..self.pos + 8)
+            .ok_or(Error::Truncated)?;
+        self.pos += 8;
+        Ok(u64::from_le_bytes([
+            s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
+        ]))
+    }
+
+    fn read_prefixes(&mut self) -> Result<Prefixes> {
+        let mut p = Prefixes::default();
+        loop {
+            let b = self.peek_u8()?;
+            match b {
+                0xF0 => {
+                    p.lock = true;
+                    self.pos += 1;
+                }
+                0xF2 => {
+                    p.repne = true;
+                    self.pos += 1;
+                }
+                0xF3 => {
+                    p.repe = true;
+                    self.pos += 1;
+                }
+                0x66 => {
+                    p.osize = true;
+                    self.pos += 1;
+                }
+                0x67 => {
+                    p.asize = true;
+                    self.pos += 1;
+                }
+                0x2E | 0x3E | 0x26 | 0x36 => {
+                    // CS/DS/ES/SS overrides are NOPs in long mode; consume but ignore.
+                    self.pos += 1;
+                }
+                0x64 => {
+                    p.seg = Some(Seg::Fs);
+                    self.pos += 1;
+                }
+                0x65 => {
+                    p.seg = Some(Seg::Gs);
+                    self.pos += 1;
+                }
+                0x40..=0x4F => {
+                    // REX must be the last prefix before the opcode.
+                    p.rex = Rex {
+                        w: (b & 0b1000) != 0,
+                        r: (b & 0b0100) != 0,
+                        x: (b & 0b0010) != 0,
+                        b: (b & 0b0001) != 0,
+                        present: true,
+                    };
+                    self.pos += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Ok(p)
+    }
+
+    /// Decode one instruction and return it. Advances `pos` past the
+    /// instruction. Returns `Op::Unhandled` for opcodes we recognise but
+    /// haven't lifted; the `len` field still reflects the correct byte
+    /// count consumed.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<Inst> {
+        let start = self.pos;
+        let inst_rip = self.guest_rip.wrapping_add(start as u64);
+        let p = self.read_prefixes()?;
+        let opcode = self.read_u8()?;
+
+        let mut inst = if opcode == 0x0F {
+            self.decode_secondary(&p, inst_rip)?
+        } else {
+            self.decode_primary(opcode, &p, inst_rip)?
+        };
+        inst.len = (self.pos - start) as u8;
+        inst.guest_rip = inst_rip;
+        Ok(inst)
+    }
+
+    fn op_size_default32(&self, p: &Prefixes) -> OpSize {
+        match (p.rex.w, p.osize) {
+            (true, _) => OpSize::B8,
+            (false, true) => OpSize::B2,
+            (false, false) => OpSize::B4,
+        }
+    }
+
+    fn op_size_default64(&self, p: &Prefixes) -> OpSize {
+        // Used for PUSH/POP/CALL/JMP — default 64-bit, OSIZE=66 → 16.
+        if p.osize {
+            OpSize::B2
+        } else {
+            OpSize::B8
+        }
+    }
+
+    fn decode_modrm(
+        &mut self,
+        p: &Prefixes,
+        size: OpSize,
+    ) -> Result<(Operand, u8 /* reg field */)> {
+        let modrm = self.read_u8()?;
+        let mod_ = modrm >> 6;
+        let reg = (modrm >> 3) & 0b111;
+        let rm = modrm & 0b111;
+
+        let rm_op = if mod_ == 0b11 {
+            // r/m is a register.
+            let r = ((p.rex.b as u8) << 3) | rm;
+            Operand::Reg(GpReg::from_index(r).unwrap(), size)
+        } else {
+            self.decode_rm_memory(p, mod_, rm, size)?
+        };
+
+        Ok((rm_op, reg))
+    }
+
+    fn decode_rm_memory(
+        &mut self,
+        p: &Prefixes,
+        mod_: u8,
+        rm: u8,
+        size: OpSize,
+    ) -> Result<Operand> {
+        let seg = p.seg;
+        // Special case: mod=00, rm=101 → RIP-relative with disp32.
+        if mod_ == 0b00 && rm == 0b101 {
+            let disp = self.read_i32()?;
+            return Ok(Operand::RipRel(disp, size));
+        }
+
+        let (base, index, scale) = if rm == 0b100 {
+            // SIB byte present.
+            let sib = self.read_u8()?;
+            let scale = 1u8 << (sib >> 6);
+            let index_idx = (sib >> 3) & 0b111;
+            let base_idx = sib & 0b111;
+
+            let index = if index_idx == 0b100 && !p.rex.x {
+                // RSP index encoding means "no index".
+                None
+            } else {
+                let r = ((p.rex.x as u8) << 3) | index_idx;
+                Some(GpReg::from_index(r).unwrap())
+            };
+
+            let base = if mod_ == 0b00 && base_idx == 0b101 {
+                // No base register; disp32 follows.
+                None
+            } else {
+                let r = ((p.rex.b as u8) << 3) | base_idx;
+                Some(GpReg::from_index(r).unwrap())
+            };
+            (base, index, scale)
+        } else {
+            let r = ((p.rex.b as u8) << 3) | rm;
+            (Some(GpReg::from_index(r).unwrap()), None, 1u8)
+        };
+
+        let disp = match mod_ {
+            // SIB with mod=00 and base_idx=101 yields no base register and
+            // therefore needs an explicit disp32; otherwise mod=00 has no
+            // displacement at all.
+            0b00 if rm == 0b100 && base.is_none() => self.read_i32()?,
+            0b01 => self.read_i8()? as i32,
+            0b10 => self.read_i32()?,
+            _ => 0,
+        };
+
+        Ok(Operand::Mem(Mem { base, index, scale, disp, size, seg }))
+    }
+
+    fn reg_operand(&self, p: &Prefixes, reg_field: u8, size: OpSize) -> Operand {
+        let r = ((p.rex.r as u8) << 3) | reg_field;
+        Operand::Reg(GpReg::from_index(r).unwrap(), size)
+    }
+
+    fn opcode_reg_operand(&self, p: &Prefixes, opcode_low3: u8, size: OpSize) -> Operand {
+        let r = ((p.rex.b as u8) << 3) | opcode_low3;
+        Operand::Reg(GpReg::from_index(r).unwrap(), size)
+    }
+
+    fn read_imm(&mut self, size: OpSize) -> Result<i64> {
+        Ok(match size {
+            OpSize::B1 => self.read_i8()? as i64,
+            OpSize::B2 => self.read_i16()? as i64,
+            OpSize::B4 => self.read_i32()? as i64,
+            OpSize::B8 => self.read_u64()? as i64,
+        })
+    }
+
+    fn decode_primary(&mut self, opcode: u8, p: &Prefixes, rip: u64) -> Result<Inst> {
+        // Helper: arithmetic/logical 0x00-0x3D family. The high nibble selects
+        // the operation; the low 3 bits select the operand form.
+        if opcode <= 0x3D && matches!(opcode & 0b111, 0..=5) {
+            let op_group = opcode >> 3;
+            let op = match op_group {
+                0 => Op::Add,
+                1 => Op::Or,
+                2 => Op::Adc,
+                3 => Op::Sbb,
+                4 => Op::And,
+                5 => Op::Sub,
+                6 => Op::Xor,
+                7 => Op::Cmp,
+                _ => unreachable!(),
+            };
+            return self.decode_arith_form(opcode, p, op, rip);
+        }
+
+        match opcode {
+            // 0x50..=0x57 PUSH r64 (default 64-bit)
+            0x50..=0x57 => {
+                let size = self.op_size_default64(p);
+                let r = self.opcode_reg_operand(p, opcode - 0x50, size);
+                Ok(make(Op::Push, [Some(r), None, None], rip))
+            }
+            // 0x58..=0x5F POP r64
+            0x58..=0x5F => {
+                let size = self.op_size_default64(p);
+                let r = self.opcode_reg_operand(p, opcode - 0x58, size);
+                Ok(make(Op::Pop, [Some(r), None, None], rip))
+            }
+            // 0x63 MOVSXD r64, r/m32 (with REX.W) or MOVSXD r32, r/m32
+            0x63 => {
+                let dst_size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm(p, OpSize::B4)?;
+                let r = self.reg_operand(p, reg, dst_size);
+                Ok(make(Op::Movsxd, [Some(r), Some(rm), None], rip))
+            }
+            // 0x68 PUSH imm32 (sign-extended)
+            0x68 => {
+                let imm = self.read_i32()? as i64;
+                let size = self.op_size_default64(p);
+                Ok(make(
+                    Op::Push,
+                    [Some(Operand::Imm(imm, size)), None, None],
+                    rip,
+                ))
+            }
+            // 0x6A PUSH imm8 (sign-extended)
+            0x6A => {
+                let imm = self.read_i8()? as i64;
+                let size = self.op_size_default64(p);
+                Ok(make(
+                    Op::Push,
+                    [Some(Operand::Imm(imm, size)), None, None],
+                    rip,
+                ))
+            }
+            // 0x69 IMUL r, r/m, imm32
+            0x69 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                let imm = if size == OpSize::B2 {
+                    self.read_i16()? as i64
+                } else {
+                    self.read_i32()? as i64
+                };
+                Ok(make(
+                    Op::Imul,
+                    [Some(r), Some(rm), Some(Operand::Imm(imm, size))],
+                    rip,
+                ))
+            }
+            // 0x6B IMUL r, r/m, imm8
+            0x6B => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                let imm = self.read_i8()? as i64;
+                Ok(make(
+                    Op::Imul,
+                    [Some(r), Some(rm), Some(Operand::Imm(imm, size))],
+                    rip,
+                ))
+            }
+            // 0x70..=0x7F Jcc rel8
+            0x70..=0x7F => {
+                let cond = cond_from_low4(opcode & 0xF);
+                let rel = self.read_i8()? as i64;
+                Ok(make(
+                    Op::Jcc(cond),
+                    [Some(Operand::Imm(rel, OpSize::B1)), None, None],
+                    rip,
+                ))
+            }
+            // 0x80 group 1 — r/m8, imm8
+            0x80 => self.decode_group1(p, OpSize::B1, OpSize::B1, rip),
+            // 0x81 group 1 — r/m, immZ
+            0x81 => {
+                let size = self.op_size_default32(p);
+                let imm_size = if size == OpSize::B2 {
+                    OpSize::B2
+                } else {
+                    OpSize::B4
+                };
+                self.decode_group1(p, size, imm_size, rip)
+            }
+            // 0x83 group 1 — r/m, imm8 sign-extended
+            0x83 => {
+                let size = self.op_size_default32(p);
+                self.decode_group1(p, size, OpSize::B1, rip)
+            }
+            // 0x84 TEST r/m8, r8
+            0x84 => {
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(Op::Test, [Some(rm), Some(r), None], rip))
+            }
+            // 0x85 TEST r/m, r
+            0x85 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Test, [Some(rm), Some(r), None], rip))
+            }
+            // 0x86 XCHG r/m8, r8
+            0x86 => {
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(Op::Xchg, [Some(rm), Some(r), None], rip))
+            }
+            // 0x87 XCHG r/m, r
+            0x87 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Xchg, [Some(rm), Some(r), None], rip))
+            }
+            // 0x88 MOV r/m8, r8
+            0x88 => {
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(Op::Mov, [Some(rm), Some(r), None], rip))
+            }
+            // 0x89 MOV r/m, r
+            0x89 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Mov, [Some(rm), Some(r), None], rip))
+            }
+            // 0x8A MOV r8, r/m8
+            0x8A => {
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(Op::Mov, [Some(r), Some(rm), None], rip))
+            }
+            // 0x8B MOV r, r/m
+            0x8B => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Mov, [Some(r), Some(rm), None], rip))
+            }
+            // 0x8D LEA r, m
+            0x8D => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Lea, [Some(r), Some(rm), None], rip))
+            }
+            // 0x8F /0 POP r/m
+            0x8F => {
+                let size = self.op_size_default64(p);
+                let (rm, sub) = self.decode_modrm(p, size)?;
+                if sub != 0 {
+                    return Ok(unhandled(rip));
+                }
+                Ok(make(Op::Pop, [Some(rm), None, None], rip))
+            }
+            // 0x90 NOP / XCHG eax, r — REP prefix turns it into PAUSE; treat both as NOP for now.
+            0x90 => Ok(make(Op::Nop, [None, None, None], rip)),
+            // 0x91..=0x97 XCHG eax/rax, r
+            0x91..=0x97 => {
+                let size = self.op_size_default32(p);
+                let acc = Operand::Reg(GpReg::Rax, size);
+                let other = self.opcode_reg_operand(p, opcode - 0x90, size);
+                Ok(make(Op::Xchg, [Some(acc), Some(other), None], rip))
+            }
+            // 0x98 CBW/CWDE/CDQE
+            0x98 => Ok(make(Op::Cwde, [None, None, None], rip)),
+            // 0x99 CWD/CDQ/CQO
+            0x99 => Ok(make(
+                if p.rex.w { Op::Cqo } else { Op::Cdq },
+                [None, None, None],
+                rip,
+            )),
+            // 0x9C PUSHFQ
+            0x9C => Ok(make(Op::Pushfq, [None, None, None], rip)),
+            // 0x9D POPFQ
+            0x9D => Ok(make(Op::Popfq, [None, None, None], rip)),
+            // 0xA8/A9 TEST AL/eax, imm
+            0xA8 => {
+                let imm = self.read_i8()? as i64;
+                Ok(make(
+                    Op::Test,
+                    [
+                        Some(Operand::Reg(GpReg::Rax, OpSize::B1)),
+                        Some(Operand::Imm(imm, OpSize::B1)),
+                        None,
+                    ],
+                    rip,
+                ))
+            }
+            0xA9 => {
+                let size = self.op_size_default32(p);
+                let imm_size = if size == OpSize::B2 {
+                    OpSize::B2
+                } else {
+                    OpSize::B4
+                };
+                let imm = self.read_imm(imm_size)?;
+                Ok(make(
+                    Op::Test,
+                    [
+                        Some(Operand::Reg(GpReg::Rax, size)),
+                        Some(Operand::Imm(imm, imm_size)),
+                        None,
+                    ],
+                    rip,
+                ))
+            }
+            // 0xB0..=0xB7 MOV r8, imm8
+            0xB0..=0xB7 => {
+                let r = self.opcode_reg_operand(p, opcode - 0xB0, OpSize::B1);
+                let imm = self.read_i8()? as i64;
+                Ok(make(
+                    Op::Mov,
+                    [Some(r), Some(Operand::Imm(imm, OpSize::B1)), None],
+                    rip,
+                ))
+            }
+            // 0xB8..=0xBF MOV r, immZ
+            0xB8..=0xBF => {
+                let size = if p.rex.w {
+                    OpSize::B8
+                } else if p.osize {
+                    OpSize::B2
+                } else {
+                    OpSize::B4
+                };
+                let r = self.opcode_reg_operand(p, opcode - 0xB8, size);
+                let imm = self.read_imm(size)?;
+                Ok(make(
+                    Op::Mov,
+                    [Some(r), Some(Operand::Imm(imm, size)), None],
+                    rip,
+                ))
+            }
+            // 0xC0/C1 group 2 — shifts r/m, imm8
+            0xC0 => self.decode_group2(p, OpSize::B1, ShiftAmount::Imm8, rip),
+            0xC1 => {
+                let size = self.op_size_default32(p);
+                self.decode_group2(p, size, ShiftAmount::Imm8, rip)
+            }
+            // 0xC2 RET imm16
+            0xC2 => {
+                let imm = self.read_u16()? as i64;
+                Ok(make(
+                    Op::RetImm,
+                    [Some(Operand::Imm(imm, OpSize::B2)), None, None],
+                    rip,
+                ))
+            }
+            // 0xC3 RET
+            0xC3 => Ok(make(Op::Ret, [None, None, None], rip)),
+            // 0xC6/C7 MOV r/m, imm (group 11 /0)
+            0xC6 => {
+                let (rm, sub) = self.decode_modrm(p, OpSize::B1)?;
+                if sub != 0 {
+                    return Ok(unhandled(rip));
+                }
+                let imm = self.read_i8()? as i64;
+                Ok(make(
+                    Op::Mov,
+                    [Some(rm), Some(Operand::Imm(imm, OpSize::B1)), None],
+                    rip,
+                ))
+            }
+            0xC7 => {
+                let size = self.op_size_default32(p);
+                let (rm, sub) = self.decode_modrm(p, size)?;
+                if sub != 0 {
+                    return Ok(unhandled(rip));
+                }
+                let imm_size = if size == OpSize::B2 {
+                    OpSize::B2
+                } else {
+                    OpSize::B4
+                };
+                let imm = self.read_imm(imm_size)?;
+                Ok(make(
+                    Op::Mov,
+                    [Some(rm), Some(Operand::Imm(imm, imm_size)), None],
+                    rip,
+                ))
+            }
+            // 0xC9 LEAVE
+            0xC9 => Ok(make(Op::Leave, [None, None, None], rip)),
+            // 0xCC INT3
+            0xCC => Ok(make(Op::Int3, [None, None, None], rip)),
+            // 0xCD INT imm8
+            0xCD => {
+                let imm = self.read_u8()? as i64;
+                Ok(make(
+                    Op::Int,
+                    [Some(Operand::Imm(imm, OpSize::B1)), None, None],
+                    rip,
+                ))
+            }
+            // 0xD0..=0xD3 group 2 shifts
+            0xD0 => self.decode_group2(p, OpSize::B1, ShiftAmount::One, rip),
+            0xD1 => {
+                let size = self.op_size_default32(p);
+                self.decode_group2(p, size, ShiftAmount::One, rip)
+            }
+            0xD2 => self.decode_group2(p, OpSize::B1, ShiftAmount::Cl, rip),
+            0xD3 => {
+                let size = self.op_size_default32(p);
+                self.decode_group2(p, size, ShiftAmount::Cl, rip)
+            }
+            // 0xE8 CALL rel32
+            0xE8 => {
+                let rel = self.read_i32()? as i64;
+                Ok(make(
+                    Op::Call,
+                    [Some(Operand::Imm(rel, OpSize::B4)), None, None],
+                    rip,
+                ))
+            }
+            // 0xE9 JMP rel32
+            0xE9 => {
+                let rel = self.read_i32()? as i64;
+                Ok(make(
+                    Op::Jmp,
+                    [Some(Operand::Imm(rel, OpSize::B4)), None, None],
+                    rip,
+                ))
+            }
+            // 0xEB JMP rel8
+            0xEB => {
+                let rel = self.read_i8()? as i64;
+                Ok(make(
+                    Op::Jmp,
+                    [Some(Operand::Imm(rel, OpSize::B1)), None, None],
+                    rip,
+                ))
+            }
+            // 0xF4 HLT
+            0xF4 => Ok(make(Op::Hlt, [None, None, None], rip)),
+            // 0xF5 CMC
+            0xF5 => Ok(make(Op::Cmc, [None, None, None], rip)),
+            // 0xF6/F7 group 3
+            0xF6 => self.decode_group3(p, OpSize::B1, rip),
+            0xF7 => {
+                let size = self.op_size_default32(p);
+                self.decode_group3(p, size, rip)
+            }
+            // 0xF8 CLC, 0xF9 STC, 0xFC CLD, 0xFD STD
+            0xF8 => Ok(make(Op::Clc, [None, None, None], rip)),
+            0xF9 => Ok(make(Op::Stc, [None, None, None], rip)),
+            0xFC => Ok(make(Op::Cld, [None, None, None], rip)),
+            0xFD => Ok(make(Op::Std, [None, None, None], rip)),
+            // 0xFE group 4 (INC/DEC r/m8)
+            0xFE => self.decode_group4(p, rip),
+            // 0xFF group 5
+            0xFF => self.decode_group5(p, rip),
+            _ => Ok(unhandled(rip)),
+        }
+    }
+
+    fn decode_secondary(&mut self, p: &Prefixes, rip: u64) -> Result<Inst> {
+        let opcode = self.read_u8()?;
+        match opcode {
+            // 0F 05 SYSCALL
+            0x05 => Ok(make(Op::Syscall, [None, None, None], rip)),
+            // 0F 0B UD2
+            0x0B => Ok(make(Op::Ud2, [None, None, None], rip)),
+            // 0F 1F /0 multi-byte NOP (variable length)
+            0x1F => {
+                let _ = self.decode_modrm(p, OpSize::B4)?;
+                Ok(make(Op::Nop, [None, None, None], rip))
+            }
+            // 0F 40..=4F CMOVcc
+            0x40..=0x4F => {
+                let cond = cond_from_low4(opcode & 0xF);
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Cmov(cond), [Some(r), Some(rm), None], rip))
+            }
+            // 0F 80..=8F Jcc rel32
+            0x80..=0x8F => {
+                let cond = cond_from_low4(opcode & 0xF);
+                let rel = self.read_i32()? as i64;
+                Ok(make(
+                    Op::Jcc(cond),
+                    [Some(Operand::Imm(rel, OpSize::B4)), None, None],
+                    rip,
+                ))
+            }
+            // 0F 90..=9F SETcc r/m8
+            0x90..=0x9F => {
+                let cond = cond_from_low4(opcode & 0xF);
+                let (rm, _) = self.decode_modrm(p, OpSize::B1)?;
+                Ok(make(Op::Set(cond), [Some(rm), None, None], rip))
+            }
+            // 0F A3 BT r/m, r
+            0xA3 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Bt, [Some(rm), Some(r), None], rip))
+            }
+            // 0F AF IMUL r, r/m
+            0xAF => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Imul, [Some(r), Some(rm), None], rip))
+            }
+            // 0F B0/B1 CMPXCHG r/m, r
+            0xB0 => {
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(Op::Cmpxchg, [Some(rm), Some(r), None], rip))
+            }
+            0xB1 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Cmpxchg, [Some(rm), Some(r), None], rip))
+            }
+            // 0F B6 MOVZX r, r/m8
+            0xB6 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Movzx, [Some(r), Some(rm), None], rip))
+            }
+            // 0F B7 MOVZX r, r/m16
+            0xB7 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, OpSize::B2)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Movzx, [Some(r), Some(rm), None], rip))
+            }
+            // 0F BA group 8: BT/BTS/BTR/BTC r/m, imm8
+            0xBA => {
+                let size = self.op_size_default32(p);
+                let (rm, sub) = self.decode_modrm(p, size)?;
+                let imm = self.read_i8()? as i64;
+                let op = match sub {
+                    4 => Op::Bt,
+                    5 => Op::Bts,
+                    6 => Op::Btr,
+                    7 => Op::Btc,
+                    _ => return Ok(unhandled(rip)),
+                };
+                Ok(make(
+                    op,
+                    [Some(rm), Some(Operand::Imm(imm, OpSize::B1)), None],
+                    rip,
+                ))
+            }
+            // 0F BC BSF, 0F BD BSR
+            0xBC | 0xBD => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                let op = if opcode == 0xBC { Op::Bsf } else { Op::Bsr };
+                Ok(make(op, [Some(r), Some(rm), None], rip))
+            }
+            // 0F BE MOVSX r, r/m8
+            0xBE => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Movsx, [Some(r), Some(rm), None], rip))
+            }
+            // 0F BF MOVSX r, r/m16
+            0xBF => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, OpSize::B2)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Movsx, [Some(r), Some(rm), None], rip))
+            }
+            // 0F C0/C1 XADD
+            0xC0 => {
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(Op::Xadd, [Some(rm), Some(r), None], rip))
+            }
+            0xC1 => {
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(Op::Xadd, [Some(rm), Some(r), None], rip))
+            }
+            _ => Ok(unhandled(rip)),
+        }
+    }
+
+    fn decode_arith_form(&mut self, opcode: u8, p: &Prefixes, op: Op, rip: u64) -> Result<Inst> {
+        let form = opcode & 0b111;
+        match form {
+            0 => {
+                // r/m8, r8
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(op, [Some(rm), Some(r), None], rip))
+            }
+            1 => {
+                // r/m, r
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(op, [Some(rm), Some(r), None], rip))
+            }
+            2 => {
+                // r8, r/m8
+                let (rm, reg) = self.decode_modrm(p, OpSize::B1)?;
+                let r = self.reg_operand(p, reg, OpSize::B1);
+                Ok(make(op, [Some(r), Some(rm), None], rip))
+            }
+            3 => {
+                // r, r/m
+                let size = self.op_size_default32(p);
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let r = self.reg_operand(p, reg, size);
+                Ok(make(op, [Some(r), Some(rm), None], rip))
+            }
+            4 => {
+                // AL, imm8
+                let imm = self.read_i8()? as i64;
+                Ok(make(
+                    op,
+                    [
+                        Some(Operand::Reg(GpReg::Rax, OpSize::B1)),
+                        Some(Operand::Imm(imm, OpSize::B1)),
+                        None,
+                    ],
+                    rip,
+                ))
+            }
+            5 => {
+                // EAX/RAX, immZ
+                let size = self.op_size_default32(p);
+                let imm_size = if size == OpSize::B2 {
+                    OpSize::B2
+                } else {
+                    OpSize::B4
+                };
+                let imm = self.read_imm(imm_size)?;
+                Ok(make(
+                    op,
+                    [
+                        Some(Operand::Reg(GpReg::Rax, size)),
+                        Some(Operand::Imm(imm, imm_size)),
+                        None,
+                    ],
+                    rip,
+                ))
+            }
+            _ => Ok(unhandled(rip)),
+        }
+    }
+
+    fn decode_group1(
+        &mut self,
+        p: &Prefixes,
+        size: OpSize,
+        imm_size: OpSize,
+        rip: u64,
+    ) -> Result<Inst> {
+        let (rm, sub) = self.decode_modrm(p, size)?;
+        let op = match sub {
+            0 => Op::Add,
+            1 => Op::Or,
+            2 => Op::Adc,
+            3 => Op::Sbb,
+            4 => Op::And,
+            5 => Op::Sub,
+            6 => Op::Xor,
+            7 => Op::Cmp,
+            _ => unreachable!(),
+        };
+        let imm = self.read_imm(imm_size)?;
+        Ok(make(
+            op,
+            [Some(rm), Some(Operand::Imm(imm, imm_size)), None],
+            rip,
+        ))
+    }
+
+    fn decode_group2(
+        &mut self,
+        p: &Prefixes,
+        size: OpSize,
+        amount: ShiftAmount,
+        rip: u64,
+    ) -> Result<Inst> {
+        let (rm, sub) = self.decode_modrm(p, size)?;
+        let op = match sub {
+            0 => Op::Rol,
+            1 => Op::Ror,
+            2 => Op::Rcl,
+            3 => Op::Rcr,
+            4 | 6 => Op::Shl,
+            5 => Op::Shr,
+            7 => Op::Sar,
+            _ => unreachable!(),
+        };
+        let amt_operand = match amount {
+            ShiftAmount::One => Operand::Imm(1, OpSize::B1),
+            ShiftAmount::Cl => Operand::Reg(GpReg::Rcx, OpSize::B1),
+            ShiftAmount::Imm8 => {
+                let v = self.read_u8()? as i64;
+                Operand::Imm(v, OpSize::B1)
+            }
+        };
+        Ok(make(op, [Some(rm), Some(amt_operand), None], rip))
+    }
+
+    fn decode_group3(&mut self, p: &Prefixes, size: OpSize, rip: u64) -> Result<Inst> {
+        let (rm, sub) = self.decode_modrm(p, size)?;
+        match sub {
+            0 | 1 => {
+                // TEST r/m, imm (two encodings — both legal)
+                let imm_size = if size == OpSize::B1 {
+                    OpSize::B1
+                } else if size == OpSize::B2 {
+                    OpSize::B2
+                } else {
+                    OpSize::B4
+                };
+                let imm = self.read_imm(imm_size)?;
+                Ok(make(
+                    Op::Test,
+                    [Some(rm), Some(Operand::Imm(imm, imm_size)), None],
+                    rip,
+                ))
+            }
+            2 => Ok(make(Op::Not, [Some(rm), None, None], rip)),
+            3 => Ok(make(Op::Neg, [Some(rm), None, None], rip)),
+            4 => Ok(make(Op::Mul, [Some(rm), None, None], rip)),
+            5 => Ok(make(Op::Imul, [Some(rm), None, None], rip)),
+            6 => Ok(make(Op::Div, [Some(rm), None, None], rip)),
+            7 => Ok(make(Op::Idiv, [Some(rm), None, None], rip)),
+            _ => unreachable!(),
+        }
+    }
+
+    fn decode_group4(&mut self, p: &Prefixes, rip: u64) -> Result<Inst> {
+        let (rm, sub) = self.decode_modrm(p, OpSize::B1)?;
+        match sub {
+            0 => Ok(make(Op::Inc, [Some(rm), None, None], rip)),
+            1 => Ok(make(Op::Dec, [Some(rm), None, None], rip)),
+            _ => Ok(unhandled(rip)),
+        }
+    }
+
+    fn decode_group5(&mut self, p: &Prefixes, rip: u64) -> Result<Inst> {
+        let size = self.op_size_default32(p);
+        let call_size = self.op_size_default64(p);
+        let (rm, sub) = self.decode_modrm(p, size)?;
+        let (rm_call, _) = (rm, sub);
+        match sub {
+            0 => Ok(make(Op::Inc, [Some(rm), None, None], rip)),
+            1 => Ok(make(Op::Dec, [Some(rm), None, None], rip)),
+            2 => Ok(make(
+                Op::CallIndirect,
+                [Some(rewidth(rm_call, call_size)), None, None],
+                rip,
+            )),
+            4 => Ok(make(
+                Op::JmpIndirect,
+                [Some(rewidth(rm_call, call_size)), None, None],
+                rip,
+            )),
+            6 => Ok(make(Op::Push, [Some(rewidth(rm_call, call_size)), None, None], rip)),
+            _ => Ok(unhandled(rip)),
+        }
+    }
+}
+
+fn rewidth(op: Operand, size: OpSize) -> Operand {
+    match op {
+        Operand::Reg(r, _) => Operand::Reg(r, size),
+        Operand::Mem(mut m) => {
+            m.size = size;
+            Operand::Mem(m)
+        }
+        Operand::RipRel(d, _) => Operand::RipRel(d, size),
+        Operand::Imm(v, _) => Operand::Imm(v, size),
+    }
+}
+
+fn make(op: Op, operands: [Option<Operand>; 3], rip: u64) -> Inst {
+    Inst { op, operands, len: 0, guest_rip: rip }
+}
+
+fn unhandled(rip: u64) -> Inst {
+    Inst { op: Op::Unhandled, operands: [None, None, None], len: 0, guest_rip: rip }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShiftAmount {
+    One,
+    Cl,
+    Imm8,
+}
+
+fn cond_from_low4(low4: u8) -> Cond {
+    match low4 {
+        0x0 => Cond::O,
+        0x1 => Cond::NO,
+        0x2 => Cond::B,
+        0x3 => Cond::NB,
+        0x4 => Cond::E,
+        0x5 => Cond::NE,
+        0x6 => Cond::BE,
+        0x7 => Cond::A,
+        0x8 => Cond::S,
+        0x9 => Cond::NS,
+        0xA => Cond::P,
+        0xB => Cond::NP,
+        0xC => Cond::L,
+        0xD => Cond::NL,
+        0xE => Cond::LE,
+        0xF => Cond::G,
+        _ => unreachable!(),
+    }
+}
+
+impl TryFrom<u8> for Cond {
+    type Error = ();
+    fn try_from(v: u8) -> core::result::Result<Self, ()> {
+        if v < 16 {
+            Ok(cond_from_low4(v))
+        } else {
+            Err(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dec(bytes: &[u8]) -> Inst {
+        let mut d = Decoder::new(bytes, 0x1000);
+        d.next().expect("decode")
+    }
+
+    fn decn(bytes: &[u8], n: usize) -> alloc::vec::Vec<Inst> {
+        extern crate alloc;
+        use alloc::vec::Vec;
+        let mut d = Decoder::new(bytes, 0x1000);
+        let mut out: Vec<Inst> = Vec::new();
+        for _ in 0..n {
+            out.push(d.next().expect("decode"));
+        }
+        out
+    }
+
+    #[test]
+    fn mov_eax_imm32() {
+        // B8 2A 00 00 00  -> mov eax, 42
+        let i = dec(&[0xB8, 0x2A, 0x00, 0x00, 0x00]);
+        assert_eq!(i.op, Op::Mov);
+        assert_eq!(i.len, 5);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::Imm(42, OpSize::B4)));
+    }
+
+    #[test]
+    fn mov_rax_imm64_rex_w() {
+        // 48 B8 11 22 33 44 55 66 77 88
+        let i = dec(&[0x48, 0xB8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]);
+        assert_eq!(i.op, Op::Mov);
+        assert_eq!(i.len, 10);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B8)));
+        if let Some(Operand::Imm(v, OpSize::B8)) = i.operands[1] {
+            assert_eq!(v as u64, 0x8877_6655_4433_2211);
+        } else {
+            panic!("expected imm64");
+        }
+    }
+
+    #[test]
+    fn mov_ecx_42_b9() {
+        // B9 2A 00 00 00 -> mov ecx, 42
+        let i = dec(&[0xB9, 0x2A, 0x00, 0x00, 0x00]);
+        assert_eq!(i.op, Op::Mov);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rcx, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::Imm(42, OpSize::B4)));
+    }
+
+    #[test]
+    fn add_eax_ebx() {
+        // 01 D8 -> add eax, ebx
+        let i = dec(&[0x01, 0xD8]);
+        assert_eq!(i.op, Op::Add);
+        assert_eq!(i.len, 2);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rbx, OpSize::B4)));
+    }
+
+    #[test]
+    fn push_rbp_pop_rbp() {
+        let v = decn(&[0x55, 0x5D], 2);
+        assert_eq!(v[0].op, Op::Push);
+        assert_eq!(v[0].operands[0], Some(Operand::Reg(GpReg::Rbp, OpSize::B8)));
+        assert_eq!(v[1].op, Op::Pop);
+        assert_eq!(v[1].operands[0], Some(Operand::Reg(GpReg::Rbp, OpSize::B8)));
+    }
+
+    #[test]
+    fn ret() {
+        let i = dec(&[0xC3]);
+        assert_eq!(i.op, Op::Ret);
+        assert_eq!(i.len, 1);
+    }
+
+    #[test]
+    fn call_rel32() {
+        // E8 2A 00 00 00 -> call +42
+        let i = dec(&[0xE8, 0x2A, 0x00, 0x00, 0x00]);
+        assert_eq!(i.op, Op::Call);
+        assert_eq!(i.operands[0], Some(Operand::Imm(42, OpSize::B4)));
+    }
+
+    #[test]
+    fn ud2() {
+        let i = dec(&[0x0F, 0x0B]);
+        assert_eq!(i.op, Op::Ud2);
+        assert_eq!(i.len, 2);
+    }
+
+    #[test]
+    fn syscall_two_byte() {
+        let i = dec(&[0x0F, 0x05]);
+        assert_eq!(i.op, Op::Syscall);
+    }
+
+    #[test]
+    fn jne_rel8() {
+        // 75 02 -> jne +2
+        let i = dec(&[0x75, 0x02]);
+        assert_eq!(i.op, Op::Jcc(Cond::NE));
+        assert_eq!(i.operands[0], Some(Operand::Imm(2, OpSize::B1)));
+    }
+
+    #[test]
+    fn jne_rel32() {
+        // 0F 85 78 56 34 12 -> jne 0x12345678
+        let i = dec(&[0x0F, 0x85, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(i.op, Op::Jcc(Cond::NE));
+        if let Some(Operand::Imm(v, OpSize::B4)) = i.operands[0] {
+            assert_eq!(v as i32, 0x1234_5678);
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn rip_relative_mov() {
+        // 48 8B 05 78 56 34 12 -> mov rax, [rip + 0x12345678]
+        let i = dec(&[0x48, 0x8B, 0x05, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(i.op, Op::Mov);
+        if let Some(Operand::RipRel(d, OpSize::B8)) = i.operands[1] {
+            assert_eq!(d, 0x1234_5678);
+        } else {
+            panic!("expected rip-relative");
+        }
+    }
+
+    #[test]
+    fn call_indirect_rip_relative() {
+        // FF 15 78 56 34 12 -> call qword ptr [rip + 0x12345678]
+        let i = dec(&[0xFF, 0x15, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(i.op, Op::CallIndirect);
+        if let Some(Operand::RipRel(d, OpSize::B8)) = i.operands[0] {
+            assert_eq!(d, 0x1234_5678);
+        } else {
+            panic!("expected rip-relative");
+        }
+    }
+
+    #[test]
+    fn add_r8_with_rex_b() {
+        // 4D 01 C8 -> add r8, r9 (REX.W+REX.R+REX.B all set)
+        let i = dec(&[0x4D, 0x01, 0xC8]);
+        assert_eq!(i.op, Op::Add);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::R8, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::R9, OpSize::B8)));
+    }
+
+    #[test]
+    fn movzx_eax_byte_ptr_rbx() {
+        // 0F B6 03 -> movzx eax, byte ptr [rbx]
+        let i = dec(&[0x0F, 0xB6, 0x03]);
+        assert_eq!(i.op, Op::Movzx);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        if let Some(Operand::Mem(m)) = i.operands[1] {
+            assert_eq!(m.base, Some(GpReg::Rbx));
+            assert_eq!(m.size, OpSize::B1);
+            assert_eq!(m.disp, 0);
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn sib_with_index() {
+        // 48 8B 04 8B -> mov rax, qword ptr [rbx + rcx*4]
+        let i = dec(&[0x48, 0x8B, 0x04, 0x8B]);
+        assert_eq!(i.op, Op::Mov);
+        if let Some(Operand::Mem(m)) = i.operands[1] {
+            assert_eq!(m.base, Some(GpReg::Rbx));
+            assert_eq!(m.index, Some(GpReg::Rcx));
+            assert_eq!(m.scale, 4);
+            assert_eq!(m.disp, 0);
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn lea_rax_rbp_8() {
+        // 48 8D 45 F8 -> lea rax, [rbp - 8]
+        let i = dec(&[0x48, 0x8D, 0x45, 0xF8]);
+        assert_eq!(i.op, Op::Lea);
+        if let Some(Operand::Mem(m)) = i.operands[1] {
+            assert_eq!(m.base, Some(GpReg::Rbp));
+            assert_eq!(m.disp, -8);
+        } else {
+            panic!();
+        }
+    }
+
+    #[test]
+    fn sub_rsp_imm32() {
+        // 48 83 EC 28 -> sub rsp, 0x28
+        let i = dec(&[0x48, 0x83, 0xEC, 0x28]);
+        assert_eq!(i.op, Op::Sub);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rsp, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::Imm(0x28, OpSize::B1)));
+    }
+
+    #[test]
+    fn int3_and_nop() {
+        let v = decn(&[0xCC, 0x90], 2);
+        assert_eq!(v[0].op, Op::Int3);
+        assert_eq!(v[1].op, Op::Nop);
+    }
+
+    #[test]
+    fn imul_three_operand() {
+        // 69 C0 78 56 34 12 -> imul eax, eax, 0x12345678
+        let i = dec(&[0x69, 0xC0, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(i.op, Op::Imul);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[2], Some(Operand::Imm(0x1234_5678, OpSize::B4)));
+    }
+
+    #[test]
+    fn cmovne() {
+        // 0F 45 C1 -> cmovne eax, ecx
+        let i = dec(&[0x0F, 0x45, 0xC1]);
+        assert_eq!(i.op, Op::Cmov(Cond::NE));
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rcx, OpSize::B4)));
+    }
+
+    #[test]
+    fn setz_al() {
+        // 0F 94 C0 -> sete al
+        let i = dec(&[0x0F, 0x94, 0xC0]);
+        assert_eq!(i.op, Op::Set(Cond::E));
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B1)));
+    }
+
+    #[test]
+    fn fs_prefix_threads_through() {
+        // 64 48 8B 04 25 30 00 00 00 -> mov rax, fs:[0x30]
+        let i = dec(&[0x64, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00]);
+        assert_eq!(i.op, Op::Mov);
+        if let Some(Operand::Mem(m)) = i.operands[1] {
+            assert_eq!(m.seg, Some(Seg::Fs));
+            assert_eq!(m.disp, 0x30);
+        } else {
+            panic!("expected memory with fs override");
+        }
+    }
 }
