@@ -1,0 +1,12 @@
+[package]
+name = "quantum-jit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quantum-core = { path = "../quantum-core" }
+
+[lints]
+workspace = true

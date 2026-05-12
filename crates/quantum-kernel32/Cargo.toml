@@ -1,0 +1,13 @@
+[package]
+name = "quantum-kernel32"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quantum-core = { path = "../quantum-core" }
+quantum-ntdll = { path = "../quantum-ntdll" }
+
+[lints]
+workspace = true
