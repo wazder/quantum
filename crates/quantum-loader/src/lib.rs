@@ -1,10 +1,16 @@
 //! Portable Executable (PE/COFF) loader.
 //!
-//! Stage 1 (this file): parse-only. We map raw bytes into typed views of
-//! the PE structures without copying or modifying anything. Image mapping,
-//! relocation, and import resolution live in sibling modules added later.
+//! Modules are added as they land:
+//!   - `pe`       : parse-only header views (done)
+//!   - `image`    : map a parsed PE into guest memory
+//!   - `reloc`    : apply the base relocation table
+//!   - `imports`  : walk the import descriptor table
+//!   - `delay_imports`, `tls`, `exception`, `load_config`, `exports`,
+//!     `debug`, `resources`, `peb` — directory parsers
+//!
+//! Today everything except `pe` is being written.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 

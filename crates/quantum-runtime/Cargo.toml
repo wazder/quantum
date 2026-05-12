@@ -1,5 +1,5 @@
 [package]
-name = "quantum-loader"
+name = "quantum-runtime"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 quantum-core = { path = "../quantum-core" }
-quantum-runtime = { path = "../quantum-runtime" }
 
 [lints]
 workspace = true

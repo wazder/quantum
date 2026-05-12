@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/quantum-core",
+    "crates/quantum-runtime",
     "crates/quantum-loader",
     "crates/quantum-jit",
     "crates/quantum-ntdll",
