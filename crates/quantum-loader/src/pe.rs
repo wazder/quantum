@@ -180,9 +180,9 @@ impl<'a> PeFile<'a> {
 
         let mut data_directories = [DataDirectory::default(); 16];
         let count = (number_of_rva_and_sizes as usize).min(16);
-        for i in 0..count {
+        for (i, slot) in data_directories.iter_mut().enumerate().take(count) {
             let entry_off = data_dir_off + i * 8;
-            data_directories[i] = DataDirectory {
+            *slot = DataDirectory {
                 virtual_address: read_u32(bytes, entry_off)?,
                 size: read_u32(bytes, entry_off + 4)?,
             };

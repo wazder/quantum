@@ -21,7 +21,9 @@ repository = "https://github.com/wazder/quantum"
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+# Default clippy groups (correctness, suspicious, complexity, perf, style).
+# Pedantic is gated behind `cargo clippy -- -W clippy::pedantic` for the
+# polish pass; it would drown out real findings if on by default tonight.
 missing_safety_doc = "deny"
 
 [profile.release]

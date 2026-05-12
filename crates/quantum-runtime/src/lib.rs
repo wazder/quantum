@@ -15,4 +15,4 @@ pub mod sys;
 pub mod thread;
 
 pub use fd::{HostFd, OpenFlags, StdStream};
-pub use mem::{MemoryManager, Protection, Region};
+pub use mem::{MachVmManager, MemoryManager, Protection, Region};
