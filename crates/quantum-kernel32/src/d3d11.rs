@@ -269,3 +269,71 @@ pub fn resolve_d3dcompiler(function: &str) -> Option<u64> {
         _ => None,
     }
 }
+
+// ---------- DXGI ----------
+//
+// DXGI sits between D3D11 and the OS — creates the factory that hands
+// out adapters, outputs, and (most importantly) swap chains. Sekiro
+// imports just CreateDXGIFactory; engine wraps the returned interface
+// to enumerate adapters and create a swap chain over a window.
+
+/// Static IDXGIFactory vtable — same layout philosophy as the
+/// ID3D11Device one above. Slots 0..2 are IUnknown.
+fn dxgi_factory_vtbl() -> &'static DeviceVtbl {
+    use std::sync::OnceLock;
+    static VTBL: OnceLock<DeviceVtbl> = OnceLock::new();
+    VTBL.get_or_init(|| {
+        let mut slots = [d3d11_method_notimpl as *const () as usize; VTABLE_SLOTS];
+        slots[0] = d3d11_qi as *const () as usize;
+        slots[1] = d3d11_addref as *const () as usize;
+        slots[2] = d3d11_release as *const () as usize;
+        DeviceVtbl { slots }
+    })
+}
+
+fn dxgi_factory_instance() -> &'static Device {
+    use std::sync::OnceLock;
+    static INST: OnceLock<Device> = OnceLock::new();
+    INST.get_or_init(|| Device {
+        vtbl: dxgi_factory_vtbl() as *const DeviceVtbl,
+        _pad: [0; 248],
+    })
+}
+
+/// `HRESULT CreateDXGIFactory(REFIID riid, void **ppFactory)`.
+/// We hand back a shared static factory regardless of the requested
+/// IID. Most games ask for IDXGIFactory or IDXGIFactory1 — both have
+/// compatible vtable headers for the IUnknown methods we implement.
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateDXGIFactory(_riid: *const c_void, pp_factory: *mut *mut c_void) -> i32 {
+    if !pp_factory.is_null() {
+        unsafe {
+            *pp_factory = dxgi_factory_instance() as *const Device as *mut c_void;
+        }
+    }
+    S_OK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateDXGIFactory1(_riid: *const c_void, pp_factory: *mut *mut c_void) -> i32 {
+    CreateDXGIFactory(_riid, pp_factory)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateDXGIFactory2(
+    _flags: u32,
+    _riid: *const c_void,
+    pp_factory: *mut *mut c_void,
+) -> i32 {
+    CreateDXGIFactory(_riid, pp_factory)
+}
+
+pub fn resolve_dxgi(function: &str) -> Option<u64> {
+    let p: *const () = match function {
+        "CreateDXGIFactory" => CreateDXGIFactory as *const (),
+        "CreateDXGIFactory1" => CreateDXGIFactory1 as *const (),
+        "CreateDXGIFactory2" => CreateDXGIFactory2 as *const (),
+        _ => return None,
+    };
+    Some(p as u64)
+}

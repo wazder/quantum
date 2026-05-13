@@ -69,12 +69,12 @@ static MODULES: &[ModuleEntry] = &[
     ModuleEntry {
         name: "user32.dll",
         handle: HANDLE_USER32,
-        resolve: stub_resolve,
+        resolve: crate::user32::resolve,
     },
     ModuleEntry {
         name: "dxgi.dll",
         handle: HANDLE_DXGI,
-        resolve: stub_resolve,
+        resolve: crate::d3d11::resolve_dxgi,
     },
     ModuleEntry {
         name: "d3d11.dll",

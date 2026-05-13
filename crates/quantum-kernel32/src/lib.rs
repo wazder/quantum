@@ -19,6 +19,7 @@ pub mod sync;
 pub mod threads;
 pub mod thunks;
 pub mod time;
+pub mod user32;
 pub mod vm;
 
 pub use heap::{GetProcessHeap, HeapAlloc, HeapFree};

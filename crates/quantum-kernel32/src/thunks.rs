@@ -23,6 +23,12 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("d3dcompiler_43.dll") {
         return crate::d3d11::resolve_d3dcompiler(function);
     }
+    if dll.eq_ignore_ascii_case("dxgi.dll") {
+        return crate::d3d11::resolve_dxgi(function);
+    }
+    if dll.eq_ignore_ascii_case("user32.dll") {
+        return crate::user32::resolve(function);
+    }
     None
 }
 
