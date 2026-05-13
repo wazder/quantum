@@ -11,11 +11,9 @@ path = "src/main.rs"
 
 [dependencies]
 quantum-core = { path = "../quantum-core" }
-quantum-loader = { path = "../quantum-loader" }
-
-[dev-dependencies]
 quantum-jit = { path = "../quantum-jit" }
 quantum-kernel32 = { path = "../quantum-kernel32" }
+quantum-loader = { path = "../quantum-loader" }
 quantum-runtime = { path = "../quantum-runtime" }
 
 [lints]

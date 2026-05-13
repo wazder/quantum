@@ -1,5 +1,11 @@
-//! `quantum` — entry point. For now: parse a PE file and dump its layout.
-//! Execution path lands once the loader, JIT, and Win32 stubs are wired up.
+//! `quantum` — entry point.
+//!
+//! Subcommands:
+//!   quantum dump <file>    — parse PE and print headers / sections
+//!   quantum run  <file>    — load PE, JIT-translate, execute, exit with
+//!                            whatever the guest passes to ExitProcess
+
+mod process;
 
 use std::env;
 use std::fs;
@@ -9,11 +15,48 @@ use quantum_loader::{PeFile, PeKind};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
-    let Some(path) = args.get(1) else {
-        eprintln!("usage: quantum <path-to.exe>");
-        return ExitCode::from(2);
-    };
+    match args.get(1).map(String::as_str) {
+        Some("run") => match args.get(2) {
+            Some(path) => cmd_run(path),
+            None => {
+                eprintln!("usage: quantum run <path-to.exe>");
+                ExitCode::from(2)
+            }
+        },
+        Some("dump") => match args.get(2) {
+            Some(path) => cmd_dump(path),
+            None => {
+                eprintln!("usage: quantum dump <path-to.exe>");
+                ExitCode::from(2)
+            }
+        },
+        // Back-compat: bare path = dump.
+        Some(path) if !path.starts_with('-') => cmd_dump(path),
+        _ => {
+            eprintln!("usage: quantum {{run|dump}} <path-to.exe>");
+            ExitCode::from(2)
+        }
+    }
+}
 
+fn cmd_run(path: &str) -> ExitCode {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("quantum: cannot read {path}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match process::run_pe(&bytes) {
+        Ok(code) => ExitCode::from((code & 0xFF) as u8),
+        Err(e) => {
+            eprintln!("quantum: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn cmd_dump(path: &str) -> ExitCode {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) => {
