@@ -42,6 +42,8 @@ pub const HANDLE_XINPUT1_3: usize = 0x4000_0000_0000_000F;
 pub const HANDLE_DINPUT8: usize = 0x4000_0000_0000_0010;
 pub const HANDLE_STEAM_API64: usize = 0x4000_0000_0000_0011;
 pub const HANDLE_NTDLL: usize = 0x4000_0000_0000_0012;
+pub const HANDLE_D3D9: usize = 0x4000_0000_0000_0013;
+pub const HANDLE_D3DX11: usize = 0x4000_0000_0000_0014;
 
 /// One entry in our known-DLL table.
 struct ModuleEntry {
@@ -77,12 +79,22 @@ static MODULES: &[ModuleEntry] = &[
     ModuleEntry {
         name: "d3d11.dll",
         handle: HANDLE_D3D11,
-        resolve: stub_resolve,
+        resolve: crate::d3d11::resolve,
     },
     ModuleEntry {
         name: "d3dcompiler_43.dll",
         handle: HANDLE_D3DCOMPILER_43,
-        resolve: stub_resolve,
+        resolve: crate::d3d11::resolve_d3dcompiler,
+    },
+    ModuleEntry {
+        name: "d3d9.dll",
+        handle: HANDLE_D3D9,
+        resolve: crate::d3d11::resolve_d3d9,
+    },
+    ModuleEntry {
+        name: "d3dx11_43.dll",
+        handle: HANDLE_D3DX11,
+        resolve: crate::d3d11::resolve_d3dx11,
     },
     ModuleEntry {
         name: "advapi32.dll",

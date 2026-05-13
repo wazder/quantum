@@ -8,6 +8,21 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("kernel32.dll") || dll.eq_ignore_ascii_case("kernelbase.dll") {
         return resolve_kernel32(function);
     }
+    if dll.eq_ignore_ascii_case("steam_api64.dll") {
+        return crate::steam::resolve(function);
+    }
+    if dll.eq_ignore_ascii_case("d3d11.dll") {
+        return crate::d3d11::resolve(function);
+    }
+    if dll.eq_ignore_ascii_case("d3d9.dll") {
+        return crate::d3d11::resolve_d3d9(function);
+    }
+    if dll.eq_ignore_ascii_case("d3dx11_43.dll") {
+        return crate::d3d11::resolve_d3dx11(function);
+    }
+    if dll.eq_ignore_ascii_case("d3dcompiler_43.dll") {
+        return crate::d3d11::resolve_d3dcompiler(function);
+    }
     None
 }
 

@@ -6,6 +6,7 @@
 //! `ProcessExit` panic raised from `ExitProcess` can propagate cleanly
 //! through the JIT call boundary back to the runner.
 
+pub mod d3d11;
 pub mod handles;
 pub mod heap;
 pub mod io;
