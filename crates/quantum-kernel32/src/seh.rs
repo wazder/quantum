@@ -176,6 +176,131 @@ pub const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 pub const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
 pub const EXCEPTION_EXECUTE_HANDLER: i32 = 1;
 
+// ---------- Vectored exception handlers ----------
+//
+// Windows lets guests register handlers via AddVectoredExceptionHandler;
+// the list is consulted *before* SEH frames on every exception. We
+// store the list here and the runtime walks it on a trap. Each handler
+// pointer is a guest function expected to be callable with Win64 ABI
+// (RCX = EXCEPTION_POINTERS*) returning i32 disposition.
+
+use core::sync::atomic::AtomicU64;
+use std::sync::Mutex;
+
+/// One registered vectored handler. The handle is what
+/// RemoveVectoredExceptionHandler accepts; we hand out monotonic
+/// 64-bit IDs (cast to a pointer) so the guest can stash and remove
+/// them cleanly.
+#[derive(Debug, Clone, Copy)]
+pub struct VectoredHandler {
+    pub handle: u64,
+    /// Guest function pointer (Win64 ABI, takes EXCEPTION_POINTERS*).
+    pub callback: u64,
+    /// If true, this handler was inserted with First=1 and appears at
+    /// the head of the chain; otherwise it was appended.
+    pub first: bool,
+}
+
+static VECTORED_HANDLERS: Mutex<Vec<VectoredHandler>> = Mutex::new(Vec::new());
+static NEXT_VECTORED_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+/// `PVOID AddVectoredExceptionHandler(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn AddVectoredExceptionHandler(
+    first: u32,
+    handler: *const core::ffi::c_void,
+) -> *mut core::ffi::c_void {
+    if handler.is_null() {
+        return core::ptr::null_mut();
+    }
+    let h = VectoredHandler {
+        handle: NEXT_VECTORED_HANDLE.fetch_add(1, core::sync::atomic::Ordering::SeqCst),
+        callback: handler as u64,
+        first: first != 0,
+    };
+    if let Ok(mut list) = VECTORED_HANDLERS.lock() {
+        if h.first {
+            list.insert(0, h);
+        } else {
+            list.push(h);
+        }
+    }
+    h.handle as *mut core::ffi::c_void
+}
+
+/// `ULONG RemoveVectoredExceptionHandler(PVOID Handle)` — returns
+/// non-zero on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn RemoveVectoredExceptionHandler(handle: *mut core::ffi::c_void) -> u32 {
+    let target = handle as u64;
+    if let Ok(mut list) = VECTORED_HANDLERS.lock() {
+        let before = list.len();
+        list.retain(|h| h.handle != target);
+        if list.len() != before {
+            return 1;
+        }
+    }
+    0
+}
+
+/// Continue handler list (used by AddVectoredContinueHandler, called
+/// after a handler returns EXCEPTION_CONTINUE_EXECUTION). Stored
+/// separately because Windows walks them in a different phase.
+static VECTORED_CONTINUE_HANDLERS: Mutex<Vec<VectoredHandler>> = Mutex::new(Vec::new());
+
+#[unsafe(no_mangle)]
+pub extern "C" fn AddVectoredContinueHandler(
+    first: u32,
+    handler: *const core::ffi::c_void,
+) -> *mut core::ffi::c_void {
+    if handler.is_null() {
+        return core::ptr::null_mut();
+    }
+    let h = VectoredHandler {
+        handle: NEXT_VECTORED_HANDLE.fetch_add(1, core::sync::atomic::Ordering::SeqCst),
+        callback: handler as u64,
+        first: first != 0,
+    };
+    if let Ok(mut list) = VECTORED_CONTINUE_HANDLERS.lock() {
+        if h.first {
+            list.insert(0, h);
+        } else {
+            list.push(h);
+        }
+    }
+    h.handle as *mut core::ffi::c_void
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RemoveVectoredContinueHandler(handle: *mut core::ffi::c_void) -> u32 {
+    let target = handle as u64;
+    if let Ok(mut list) = VECTORED_CONTINUE_HANDLERS.lock() {
+        let before = list.len();
+        list.retain(|h| h.handle != target);
+        if list.len() != before {
+            return 1;
+        }
+    }
+    0
+}
+
+/// Snapshot the vectored-exception handler chain (in invocation order)
+/// for the runtime to walk on a trap.
+pub fn vectored_handlers_snapshot() -> Vec<VectoredHandler> {
+    VECTORED_HANDLERS
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// Snapshot the vectored-continue handler chain.
+pub fn vectored_continue_handlers_snapshot() -> Vec<VectoredHandler> {
+    VECTORED_CONTINUE_HANDLERS
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
 impl Context {
     /// Copy guest GPRs + RIP from a 16-slot register array (matching
     /// `GuestContext::gprs` order: RAX, RCX, RDX, RBX, RSP, RBP, RSI,
@@ -243,6 +368,30 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vectored_register_and_remove() {
+        // Use unique-looking addresses to avoid collisions with anything
+        // else that might register during tests.
+        let h1 = AddVectoredExceptionHandler(0, 0xDEAD_BEE1u64 as *const _);
+        let h2 = AddVectoredExceptionHandler(1, 0xDEAD_BEE2u64 as *const _);
+        assert!(!h1.is_null());
+        assert!(!h2.is_null());
+        // h2 was inserted with First=1, so it should be at the head.
+        let snap = vectored_handlers_snapshot();
+        assert!(snap.iter().any(|h| h.callback == 0xDEAD_BEE1u64));
+        assert!(snap.iter().any(|h| h.callback == 0xDEAD_BEE2u64));
+        let head = snap
+            .iter()
+            .find(|h| h.callback == 0xDEAD_BEE2u64 || h.callback == 0xDEAD_BEE1u64)
+            .unwrap();
+        assert_eq!(head.callback, 0xDEAD_BEE2u64);
+
+        assert_eq!(RemoveVectoredExceptionHandler(h1), 1);
+        assert_eq!(RemoveVectoredExceptionHandler(h2), 1);
+        // Removing twice should fail.
+        assert_eq!(RemoveVectoredExceptionHandler(h1), 0);
+    }
 
     /// Layout-check: Context field offsets must match Win64's <winnt.h>.
     /// These are the offsets every Windows binary that touches CONTEXT

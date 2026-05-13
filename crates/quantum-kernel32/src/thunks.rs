@@ -78,6 +78,10 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
         "RtlAddFunctionTable" => crate::stubs::RtlAddFunctionTable as *const (),
         "UnhandledExceptionFilter" => crate::stubs::UnhandledExceptionFilter as *const (),
         "SetUnhandledExceptionFilter" => crate::stubs::SetUnhandledExceptionFilter as *const (),
+        "AddVectoredExceptionHandler" => crate::seh::AddVectoredExceptionHandler as *const (),
+        "RemoveVectoredExceptionHandler" => crate::seh::RemoveVectoredExceptionHandler as *const (),
+        "AddVectoredContinueHandler" => crate::seh::AddVectoredContinueHandler as *const (),
+        "RemoveVectoredContinueHandler" => crate::seh::RemoveVectoredContinueHandler as *const (),
 
         // CRT init
         "GetCommandLineA" => crate::stubs::GetCommandLineA as *const (),
