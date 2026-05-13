@@ -231,6 +231,10 @@ pub enum Op {
     PsubQ,
     PaddD,
     PsubD,
+    PaddW,
+    PsubW,
+    PaddB,
+    PsubB,
     /// Packed FP arithmetic. The OpSize carried on the XMM operand is
     /// B4 for single (4x32) lanes or B8 for double (2x64) lanes.
     AddPacked,

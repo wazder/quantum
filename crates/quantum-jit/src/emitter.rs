@@ -874,6 +874,26 @@ impl Emitter {
         let w = 0x6EA0_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+    /// ADD Vd.16B, Vn.16B, Vm.16B — 16-lane byte add.
+    pub fn add_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4E20_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SUB Vd.16B, Vn.16B, Vm.16B.
+    pub fn sub_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E20_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// ADD Vd.8H, Vn.8H, Vm.8H — 8-lane halfword add.
+    pub fn add_v8h(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4E60_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SUB Vd.8H, Vn.8H, Vm.8H.
+    pub fn sub_v8h(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E60_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 
     // Packed FP arith — three-same FP NEON.
     //   0_Q_U_01110_sz_1_Rm_opcode_1_Rn_Rd

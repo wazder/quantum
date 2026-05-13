@@ -148,6 +148,10 @@ impl<'a> Lifter<'a> {
             Op::PsubQ => self.lift_packed_arith(inst, PackedArith::SubQ),
             Op::PaddD => self.lift_packed_arith(inst, PackedArith::AddD),
             Op::PsubD => self.lift_packed_arith(inst, PackedArith::SubD),
+            Op::PaddW => self.lift_packed_arith(inst, PackedArith::AddW),
+            Op::PsubW => self.lift_packed_arith(inst, PackedArith::SubW),
+            Op::PaddB => self.lift_packed_arith(inst, PackedArith::AddB),
+            Op::PsubB => self.lift_packed_arith(inst, PackedArith::SubB),
             Op::AddPacked => self.lift_packed_fp(inst, FpPackedOp::Add),
             Op::SubPacked => self.lift_packed_fp(inst, FpPackedOp::Sub),
             Op::MulPacked => self.lift_packed_fp(inst, FpPackedOp::Mul),
@@ -1410,6 +1414,10 @@ impl<'a> Lifter<'a> {
             PackedArith::SubQ => self.emitter.sub_v2d(dst_v, dst_v, src_v),
             PackedArith::AddD => self.emitter.add_v4s(dst_v, dst_v, src_v),
             PackedArith::SubD => self.emitter.sub_v4s(dst_v, dst_v, src_v),
+            PackedArith::AddW => self.emitter.add_v8h(dst_v, dst_v, src_v),
+            PackedArith::SubW => self.emitter.sub_v8h(dst_v, dst_v, src_v),
+            PackedArith::AddB => self.emitter.add_v16b(dst_v, dst_v, src_v),
+            PackedArith::SubB => self.emitter.sub_v16b(dst_v, dst_v, src_v),
         }
         self.emitter
             .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
@@ -2482,6 +2490,14 @@ enum PackedArith {
     AddD,
     /// 4-lane 32-bit sub (PSUBD).
     SubD,
+    /// 8-lane 16-bit add (PADDW).
+    AddW,
+    /// 8-lane 16-bit sub (PSUBW).
+    SubW,
+    /// 16-lane 8-bit add (PADDB).
+    AddB,
+    /// 16-lane 8-bit sub (PSUBB).
+    SubB,
 }
 
 #[derive(Debug, Clone, Copy)]

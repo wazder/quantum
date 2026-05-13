@@ -1104,6 +1104,30 @@ impl<'a> Decoder<'a> {
                 let xmm = Operand::XmmReg(reg, OpSize::B8);
                 Ok(make(Op::PsubD, [Some(xmm), Some(rm), None], rip))
             }
+            // 66 0F FD /r PADDW — 8x16-bit packed add.
+            0xFD if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PaddW, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F F9 /r PSUBW.
+            0xF9 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PsubW, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F FC /r PADDB — 16x8-bit packed add.
+            0xFC if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PaddB, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F F8 /r PSUBB.
+            0xF8 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PsubB, [Some(xmm), Some(rm), None], rip))
+            }
             _ => Ok(unhandled(rip)),
         }
     }
@@ -1726,6 +1750,20 @@ mod tests {
         assert_eq!(i.op, Op::PaddQ);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn paddb_xmm_xmm() {
+        // 66 0F FC C1 -> paddb xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0xFC, 0xC1]);
+        assert_eq!(i.op, Op::PaddB);
+    }
+
+    #[test]
+    fn psubw_xmm_xmm() {
+        // 66 0F F9 C1 -> psubw xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0xF9, 0xC1]);
+        assert_eq!(i.op, Op::PsubW);
     }
 
     #[test]
