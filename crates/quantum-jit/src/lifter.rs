@@ -677,17 +677,15 @@ impl<'a> Lifter<'a> {
         let a = inst.operands[0].ok_or(LifterError::BadOperands)?;
         let b = inst.operands[1].ok_or(LifterError::BadOperands)?;
         match (a, b) {
-            (Operand::Reg(ra, size), Operand::Reg(rb, _))
-                if matches!(size, OpSize::B4 | OpSize::B8) =>
-            {
+            (Operand::Reg(ra, OpSize::B4 | OpSize::B8), Operand::Reg(rb, _)) => {
                 // For B4 we still use the 64-bit form because both
                 // sides are masked to 32 bits in their pinned regs.
                 // SUBS still sets NZCV correctly for the bit pattern.
                 self.emitter.cmp64(host_reg(ra), host_reg(rb));
                 Ok(())
             }
-            (Operand::Reg(ra, size), Operand::Imm(imm, _))
-                if matches!(size, OpSize::B4 | OpSize::B8) && (0..(1 << 24)).contains(&imm) =>
+            (Operand::Reg(ra, OpSize::B4 | OpSize::B8), Operand::Imm(imm, _))
+                if (0..(1 << 24)).contains(&imm) =>
             {
                 self.emitter.cmp64_imm(host_reg(ra), imm as u32);
                 Ok(())
