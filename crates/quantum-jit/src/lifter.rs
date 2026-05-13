@@ -164,6 +164,8 @@ impl<'a> Lifter<'a> {
             Op::PmullW => self.lift_pmullw(inst),
             Op::PslldqImm => self.lift_pshift_dq(inst, true),
             Op::PsrldqImm => self.lift_pshift_dq(inst, false),
+            Op::PunpckLow(lane) => self.lift_punpck(inst, lane, false),
+            Op::PunpckHigh(lane) => self.lift_punpck(inst, lane, true),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1293,6 +1295,50 @@ impl<'a> Lifter<'a> {
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
+        Ok(())
+    }
+
+    /// PUNPCKLxx / PUNPCKHxx — interleave low/high lanes of dst and src.
+    /// PUNPCKL takes [dst[0], src[0], dst[1], src[1], ...] from the low
+    /// half; PUNPCKH does the same with high lanes. NEON ZIP1 / ZIP2
+    /// are exact matches at every lane width.
+    fn lift_punpck(&mut self, inst: &Inst, lane: OpSize, high: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // ZIP1/ZIP2 take (Vn, Vm) and interleave — for x86 PUNPCK the
+        // result is interleaved as [dst_lane, src_lane, ...], so Vn=dst,
+        // Vm=src matches the x86 ordering.
+        match (high, lane) {
+            (false, OpSize::B1) => self.emitter.zip1_v16b(dst_v, dst_v, src_v),
+            (false, OpSize::B2) => self.emitter.zip1_v8h(dst_v, dst_v, src_v),
+            (false, OpSize::B4) => self.emitter.zip1_v4s(dst_v, dst_v, src_v),
+            (false, OpSize::B8) => self.emitter.zip1_v2d(dst_v, dst_v, src_v),
+            (true, OpSize::B1) => self.emitter.zip2_v16b(dst_v, dst_v, src_v),
+            (true, OpSize::B2) => self.emitter.zip2_v8h(dst_v, dst_v, src_v),
+            (true, OpSize::B4) => self.emitter.zip2_v4s(dst_v, dst_v, src_v),
+            (true, OpSize::B8) => self.emitter.zip2_v2d(dst_v, dst_v, src_v),
+        }
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
         Ok(())
     }
 

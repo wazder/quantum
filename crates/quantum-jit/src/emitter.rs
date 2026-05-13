@@ -1068,6 +1068,44 @@ impl Emitter {
             | (vd.0 as u32);
         self.push(w);
     }
+
+    // Permute three-same: ZIP1 / ZIP2 (interleave low / high halves).
+    fn zip_form(&mut self, base: u32, vd: Reg, vn: Reg, vm: Reg) {
+        let w = base | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// ZIP1 Vd.16B, Vn.16B, Vm.16B.
+    pub fn zip1_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4E00_3800, vd, vn, vm);
+    }
+    /// ZIP1 Vd.8H.
+    pub fn zip1_v8h(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4E40_3800, vd, vn, vm);
+    }
+    /// ZIP1 Vd.4S.
+    pub fn zip1_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4E80_3800, vd, vn, vm);
+    }
+    /// ZIP1 Vd.2D.
+    pub fn zip1_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4EC0_3800, vd, vn, vm);
+    }
+    /// ZIP2 Vd.16B.
+    pub fn zip2_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4E00_7800, vd, vn, vm);
+    }
+    /// ZIP2 Vd.8H.
+    pub fn zip2_v8h(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4E40_7800, vd, vn, vm);
+    }
+    /// ZIP2 Vd.4S.
+    pub fn zip2_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4E80_7800, vd, vn, vm);
+    }
+    /// ZIP2 Vd.2D.
+    pub fn zip2_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.zip_form(0x4EC0_7800, vd, vn, vm);
+    }
 }
 
 // =============== Load/Store pair ===============

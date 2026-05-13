@@ -260,6 +260,11 @@ pub enum Op {
     PslldqImm,
     /// PSRLDQ imm8 — shift the whole 128-bit register right by imm8 bytes.
     PsrldqImm,
+    /// PUNPCKLxx — interleave low lanes of dst with low lanes of src.
+    /// Lane width carried (B1=BW, B2=WD, B4=DQ, B8=QDQ).
+    PunpckLow(OpSize),
+    /// PUNPCKHxx — interleave high lanes.
+    PunpckHigh(OpSize),
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

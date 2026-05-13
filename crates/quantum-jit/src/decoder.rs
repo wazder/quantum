@@ -823,6 +823,32 @@ impl<'a> Decoder<'a> {
                     rip,
                 ))
             }
+            // PUNPCKLxx / PUNPCKHxx family with OSIZE prefix:
+            //   66 0F 60 PUNPCKLBW  | 66 0F 68 PUNPCKHBW
+            //   66 0F 61 PUNPCKLWD  | 66 0F 69 PUNPCKHWD
+            //   66 0F 62 PUNPCKLDQ  | 66 0F 6A PUNPCKHDQ
+            //   66 0F 6C PUNPCKLQDQ | 66 0F 6D PUNPCKHQDQ
+            0x60..=0x62 | 0x68..=0x6A | 0x6C | 0x6D if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                let (high, lane) = match opcode {
+                    0x60 => (false, OpSize::B1),
+                    0x61 => (false, OpSize::B2),
+                    0x62 => (false, OpSize::B4),
+                    0x68 => (true, OpSize::B1),
+                    0x69 => (true, OpSize::B2),
+                    0x6A => (true, OpSize::B4),
+                    0x6C => (false, OpSize::B8),
+                    0x6D => (true, OpSize::B8),
+                    _ => unreachable!(),
+                };
+                let op = if high {
+                    Op::PunpckHigh(lane)
+                } else {
+                    Op::PunpckLow(lane)
+                };
+                Ok(make(op, [Some(xmm), Some(rm), None], rip))
+            }
             // 66 0F D5 /r PMULLW — 8-lane 16-bit multiply (low 16).
             0xD5 if p.osize => {
                 let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
@@ -1870,6 +1896,27 @@ mod tests {
         // 66 0F 71 E0 03 -> psraw xmm0, 3
         let i = dec(&[0x66, 0x0F, 0x71, 0xE0, 0x03]);
         assert_eq!(i.op, Op::PsraImm(OpSize::B2));
+    }
+
+    #[test]
+    fn punpcklbw_xmm_xmm() {
+        // 66 0F 60 C1 -> punpcklbw xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x60, 0xC1]);
+        assert_eq!(i.op, Op::PunpckLow(OpSize::B1));
+    }
+
+    #[test]
+    fn punpckhdq_xmm_xmm() {
+        // 66 0F 6A C1 -> punpckhdq xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x6A, 0xC1]);
+        assert_eq!(i.op, Op::PunpckHigh(OpSize::B4));
+    }
+
+    #[test]
+    fn punpcklqdq_xmm_xmm() {
+        // 66 0F 6C C1 -> punpcklqdq xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x6C, 0xC1]);
+        assert_eq!(i.op, Op::PunpckLow(OpSize::B8));
     }
 
     #[test]
