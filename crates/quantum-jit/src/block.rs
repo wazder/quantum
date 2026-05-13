@@ -259,7 +259,29 @@ pub fn translate_for_dispatcher(
             emit_epilogue_const_rip(&mut emitter, taken_rip);
         }
         Op::JmpIndirect => {
-            return Err(BlockError::Lift(LifterError::Unsupported(Op::JmpIndirect)));
+            // Resolve the indirect target into X16 and use it as next_rip.
+            //   Operand::Reg(r)         -> X16 = host_reg(r)
+            //   Operand::Mem(_) | RipRel -> X16 = effective addr; X16 = *X16
+            let target = term.operands[0].ok_or(BlockError::BadOperand)?;
+            match target {
+                Operand::Reg(r, _) => {
+                    let hr = crate::lifter::host_reg(r);
+                    emitter.mov64(Reg::X16, hr);
+                }
+                Operand::Mem(_) | Operand::RipRel(_, _) => {
+                    // Build the effective address in X16 via a tiny lifter
+                    // (re-using addr_into_xtmp), then dereference it.
+                    let leftover = {
+                        let mut lif = Lifter::new(&mut emitter);
+                        lif.addr_into_xtmp(&target, term, Reg::X16)?
+                    };
+                    emitter.ldr64(Reg::X16, Reg::X16, leftover);
+                }
+                _ => return Err(BlockError::BadOperand),
+            }
+            emit_regs_to_ctx(&mut emitter);
+            emitter.mov64(Reg::X0, Reg::X16);
+            emit_host_epilogue(&mut emitter);
         }
         _ => {
             // No terminator decoded — bytes ran out. Stop the

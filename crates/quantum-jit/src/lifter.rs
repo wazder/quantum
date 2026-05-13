@@ -124,7 +124,7 @@ impl<'a> Lifter<'a> {
     /// For `RipRel(disp, size)` the effective guest address is fixed at
     /// translate time: `inst.guest_rip + inst.len + disp`. We embed it
     /// as a 64-bit immediate via `load_const64`.
-    fn addr_into_xtmp(&mut self, op: &Operand, inst: &Inst, xtmp: Reg) -> LifterResult<u32> {
+    pub(crate) fn addr_into_xtmp(&mut self, op: &Operand, inst: &Inst, xtmp: Reg) -> LifterResult<u32> {
         match *op {
             Operand::Mem(m) => Ok(self.mem_address_into(m, xtmp)),
             Operand::RipRel(disp, _) => {
