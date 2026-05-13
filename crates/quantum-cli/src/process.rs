@@ -193,6 +193,43 @@ fn load_side_dlls(
     out
 }
 
+/// Run a side-loaded DLL's TLS callbacks then its DllMain, both with
+/// PROCESS_ATTACH semantics. Any fault inside is reported via trace
+/// but doesn't abort the whole init sequence — most game code keeps
+/// working even if a single DLL fails to init.
+fn init_side_module(disp: &mut Dispatcher, sm: &SideModule, ctx: &mut GuestContext, trace: bool) {
+    if let Ok(Some(tls)) = quantum_loader::tls::parse(&sm.image) {
+        for cb_rva in &tls.callbacks {
+            let cb_va = sm.image.actual_base + *cb_rva as u64;
+            if trace {
+                eprintln!("[trace] TLS cb @ {cb_va:#x} ({})", sm.name);
+            }
+            ctx.gprs[1] = sm.image.actual_base; // RCX = hinstDLL
+            ctx.gprs[2] = 1; // RDX = DLL_PROCESS_ATTACH
+            ctx.gprs[8] = 0; // R8 = reserved
+            if let Err(e) = invoke_guest_function(disp, &sm.image, ctx, cb_va)
+                && trace
+            {
+                eprintln!("[trace] {} TLS cb errored: {e}", sm.name);
+            }
+        }
+    }
+    if sm.image.entry_rva != 0 {
+        let entry_va = sm.image.actual_base + sm.image.entry_rva as u64;
+        if trace {
+            eprintln!("[trace] DllMain @ {entry_va:#x} ({})", sm.name);
+        }
+        ctx.gprs[1] = sm.image.actual_base;
+        ctx.gprs[2] = 1;
+        ctx.gprs[8] = 0;
+        if let Err(e) = invoke_guest_function(disp, &sm.image, ctx, entry_va)
+            && trace
+        {
+            eprintln!("[trace] {} DllMain errored: {e}", sm.name);
+        }
+    }
+}
+
 /// True if `resolve()` in quantum-kernel32 recognises this DLL — i.e.
 /// we have a built-in stub set and shouldn't try to side-load it.
 fn has_builtin(dll: &str) -> bool {
@@ -331,7 +368,30 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
         eprintln!("[trace] entering JIT at {entry_va:#x}");
     }
 
+    // DLL init phase is gated behind QUANTUM_RUN_DLL_INIT because nested
+    // crash handling isn't wired yet — a fault inside any DllMain or
+    // TLS callback longjmps out of the *outer* run_with_exit_trap and
+    // aborts the whole run. With the env var off (default) we skip the
+    // inits; the main entry still gets normal SEH coverage.
+    let run_dll_init = std::env::var("QUANTUM_RUN_DLL_INIT").is_ok();
     let mut exit_code = run_with_exit_trap(|| {
+        if run_dll_init {
+            for sm in &side_modules {
+                init_side_module(&mut disp, sm, &mut ctx, trace);
+            }
+            if let Ok(Some(tls)) = quantum_loader::tls::parse(&image) {
+                for cb_rva in &tls.callbacks {
+                    let cb_va = image.actual_base + *cb_rva as u64;
+                    if trace {
+                        eprintln!("[trace] main TLS callback @ {cb_va:#x}");
+                    }
+                    ctx.gprs[1] = image.actual_base;
+                    ctx.gprs[2] = 1;
+                    ctx.gprs[8] = 0;
+                    let _ = invoke_guest_function(&mut disp, &image, &mut ctx, cb_va);
+                }
+            }
+        }
         if let Err(e) = run_dispatcher_loop(&mut disp, &image, &mut ctx, entry_va) {
             eprintln!("[trace] dispatcher: {e}");
         }
