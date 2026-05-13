@@ -7,7 +7,10 @@ name = "quantum-cli"
 version = "0.0.1"
 dependencies = [
  "quantum-core",
+ "quantum-jit",
+ "quantum-kernel32",
  "quantum-loader",
+ "quantum-runtime",
 ]
 
 [[package]]
@@ -28,6 +31,7 @@ version = "0.0.1"
 dependencies = [
  "quantum-core",
  "quantum-ntdll",
+ "quantum-runtime",
 ]
 
 [[package]]

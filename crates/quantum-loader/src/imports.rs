@@ -73,6 +73,41 @@ pub fn parse(image: &LoadedImage) -> Result<ImportTable> {
     parse_with_directory(image, dir::IMPORT)
 }
 
+/// Walk every import and stamp the resolved host address into its IAT
+/// slot. The resolver receives `(dll, name)` for named imports and
+/// `(dll, "#NNN")` for ordinal imports. A resolver returning `None`
+/// fails the wiring.
+pub fn wire_iat<F>(image: &mut LoadedImage, imports: &ImportTable, mut resolver: F) -> Result<()>
+where
+    F: FnMut(&str, &str) -> Option<u64>,
+{
+    use alloc::string::String;
+    for dll in &imports.dlls {
+        for entry in &dll.entries {
+            let lookup_name: String = match entry {
+                ImportEntry::Name { name, .. } => name.clone(),
+                ImportEntry::Ordinal { ordinal, .. } => {
+                    let mut s = String::from("#");
+                    s.push_str(&alloc::format!("{ordinal}"));
+                    s
+                }
+            };
+            let target = resolver(&dll.name, &lookup_name).ok_or_else(|| Error::Malformed {
+                what: "unresolved import",
+                at: entry.iat_slot_rva() as usize,
+            })?;
+            let slot = image
+                .rva_to_slice_mut(entry.iat_slot_rva(), 8)
+                .ok_or(Error::Malformed {
+                    what: "iat slot oob",
+                    at: entry.iat_slot_rva() as usize,
+                })?;
+            slot.copy_from_slice(&target.to_le_bytes());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_with_directory(image: &LoadedImage, directory: usize) -> Result<ImportTable> {
     let dir = match image.data_dir(directory) {
         Some(d) => d,

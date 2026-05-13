@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 quantum-core = { path = "../quantum-core" }
 quantum-ntdll = { path = "../quantum-ntdll" }
+quantum-runtime = { path = "../quantum-runtime" }
 
 [lints]
 workspace = true

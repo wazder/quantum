@@ -13,5 +13,10 @@ path = "src/main.rs"
 quantum-core = { path = "../quantum-core" }
 quantum-loader = { path = "../quantum-loader" }
 
+[dev-dependencies]
+quantum-jit = { path = "../quantum-jit" }
+quantum-kernel32 = { path = "../quantum-kernel32" }
+quantum-runtime = { path = "../quantum-runtime" }
+
 [lints]
 workspace = true
