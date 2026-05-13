@@ -687,6 +687,49 @@ impl Emitter {
         let w = 0x4EA0_1C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+
+    // Scalar FP arithmetic (2-source). Format:
+    //   0_0_0_11110 type 1 Rm opcode 10 Rn Rd
+    // where type=00 for single (32b), type=01 for double (64b),
+    // opcode 0000=MUL 0001=DIV 0010=ADD 0011=SUB.
+    fn fp2src(&mut self, base: u32, vd: Reg, vn: Reg, vm: Reg) {
+        let w = base | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// FADD Dd, Dn, Dm — scalar double add.
+    pub fn fadd_d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E60_2800, vd, vn, vm);
+    }
+    /// FSUB Dd, Dn, Dm.
+    pub fn fsub_d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E60_3800, vd, vn, vm);
+    }
+    /// FMUL Dd, Dn, Dm.
+    pub fn fmul_d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E60_0800, vd, vn, vm);
+    }
+    /// FDIV Dd, Dn, Dm.
+    pub fn fdiv_d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E60_1800, vd, vn, vm);
+    }
+
+    /// FADD Sd, Sn, Sm — scalar single add.
+    pub fn fadd_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E20_2800, vd, vn, vm);
+    }
+    /// FSUB Sd, Sn, Sm.
+    pub fn fsub_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E20_3800, vd, vn, vm);
+    }
+    /// FMUL Sd, Sn, Sm.
+    pub fn fmul_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E20_0800, vd, vn, vm);
+    }
+    /// FDIV Sd, Sn, Sm.
+    pub fn fdiv_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E20_1800, vd, vn, vm);
+    }
 }
 
 // =============== Load/Store pair ===============

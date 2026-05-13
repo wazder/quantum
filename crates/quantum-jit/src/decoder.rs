@@ -802,6 +802,26 @@ impl<'a> Decoder<'a> {
                 let xmm = Operand::XmmReg(reg, OpSize::B8);
                 Ok(make(Op::PorXmm, [Some(xmm), Some(rm), None], rip))
             }
+            // Scalar FP arithmetic ops. The F2 (REPNE) prefix selects
+            // double precision; F3 (REPE) selects single. Operand size
+            // on the XMM is B8 for SD or B4 for SS.
+            //   0F 58 /r  ADD{SD,SS}
+            //   0F 59 /r  MUL{SD,SS}
+            //   0F 5C /r  SUB{SD,SS}
+            //   0F 5E /r  DIV{SD,SS}
+            0x58 | 0x59 | 0x5C | 0x5E if p.repne || p.repe => {
+                let size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                let op = match opcode {
+                    0x58 => Op::AddScalar,
+                    0x59 => Op::MulScalar,
+                    0x5C => Op::SubScalar,
+                    0x5E => Op::DivScalar,
+                    _ => unreachable!(),
+                };
+                Ok(make(op, [Some(xmm), Some(rm), None], rip))
+            }
             // 0F 1F /0 multi-byte NOP (variable length)
             0x1F => {
                 let _ = self.decode_modrm(p, OpSize::B4)?;
@@ -1467,6 +1487,32 @@ mod tests {
         assert_eq!(i.op, Op::PxorXmm);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(0, OpSize::B8)));
+    }
+
+    #[test]
+    fn addsd_xmm_xmm() {
+        // F2 0F 58 C1 -> addsd xmm0, xmm1
+        let i = dec(&[0xF2, 0x0F, 0x58, 0xC1]);
+        assert_eq!(i.op, Op::AddScalar);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn mulss_xmm_xmm() {
+        // F3 0F 59 C1 -> mulss xmm0, xmm1
+        let i = dec(&[0xF3, 0x0F, 0x59, 0xC1]);
+        assert_eq!(i.op, Op::MulScalar);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
+    }
+
+    #[test]
+    fn divsd_xmm_mem() {
+        // F2 0F 5E 04 24 -> divsd xmm0, [rsp]
+        let i = dec(&[0xF2, 0x0F, 0x5E, 0x04, 0x24]);
+        assert_eq!(i.op, Op::DivScalar);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
     }
 
     #[test]

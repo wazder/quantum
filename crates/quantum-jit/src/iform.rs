@@ -196,6 +196,12 @@ pub enum Op {
     PandXmm,
     /// 128-bit packed bitwise OR.
     PorXmm,
+    /// Scalar FP arithmetic. The `OpSize` carried on the operand
+    /// distinguishes single (B4) from double (B8) precision.
+    AddScalar,
+    SubScalar,
+    MulScalar,
+    DivScalar,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

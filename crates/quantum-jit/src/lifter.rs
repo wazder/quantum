@@ -128,6 +128,10 @@ impl<'a> Lifter<'a> {
             Op::PxorXmm => self.lift_packed_logical(inst, PackedLogic::Xor),
             Op::PandXmm => self.lift_packed_logical(inst, PackedLogic::And),
             Op::PorXmm => self.lift_packed_logical(inst, PackedLogic::Or),
+            Op::AddScalar => self.lift_scalar_fp(inst, FpOp::Add),
+            Op::SubScalar => self.lift_scalar_fp(inst, FpOp::Sub),
+            Op::MulScalar => self.lift_scalar_fp(inst, FpOp::Mul),
+            Op::DivScalar => self.lift_scalar_fp(inst, FpOp::Div),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1043,6 +1047,72 @@ impl<'a> Lifter<'a> {
         Ok(())
     }
 
+    /// Scalar FP arithmetic — ADDSD/SUBSD/MULSD/DIVSD (B8) and
+    /// ADDSS/SUBSS/MULSS/DIVSS (B4). The destination XMM's upper bits
+    /// (bits 64..127 for SD, bits 32..127 for SS) are preserved per
+    /// x86 semantics — we only overwrite the low D or S slot.
+    fn lift_scalar_fp(&mut self, inst: &Inst, op: FpOp) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (dst_idx, size) = match dst {
+            Operand::XmmReg(d, s) => (d, s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        // Load dst's low scalar into V16.
+        match size {
+            OpSize::B8 => self
+                .emitter
+                .ldr_d(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx)),
+            OpSize::B4 => self
+                .emitter
+                .ldr_s(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx)),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // Load src's low scalar into V17.
+        match src {
+            Operand::XmmReg(s, _) => match size {
+                OpSize::B8 => self
+                    .emitter
+                    .ldr_d(src_v, Reg::x(28), Self::xmm_ctx_offset(s)),
+                OpSize::B4 => self
+                    .emitter
+                    .ldr_s(src_v, Reg::x(28), Self::xmm_ctx_offset(s)),
+                _ => return Err(LifterError::Unsupported(inst.op)),
+            },
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                match size {
+                    OpSize::B8 => self.emitter.ldr_d(src_v, Reg::X17, leftover),
+                    OpSize::B4 => self.emitter.ldr_s(src_v, Reg::X17, leftover),
+                    _ => return Err(LifterError::Unsupported(inst.op)),
+                }
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // FP op into V16.
+        match (op, size) {
+            (FpOp::Add, OpSize::B8) => self.emitter.fadd_d(dst_v, dst_v, src_v),
+            (FpOp::Sub, OpSize::B8) => self.emitter.fsub_d(dst_v, dst_v, src_v),
+            (FpOp::Mul, OpSize::B8) => self.emitter.fmul_d(dst_v, dst_v, src_v),
+            (FpOp::Div, OpSize::B8) => self.emitter.fdiv_d(dst_v, dst_v, src_v),
+            (FpOp::Add, OpSize::B4) => self.emitter.fadd_s(dst_v, dst_v, src_v),
+            (FpOp::Sub, OpSize::B4) => self.emitter.fsub_s(dst_v, dst_v, src_v),
+            (FpOp::Mul, OpSize::B4) => self.emitter.fmul_s(dst_v, dst_v, src_v),
+            (FpOp::Div, OpSize::B4) => self.emitter.fdiv_s(dst_v, dst_v, src_v),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // Store back, preserving the rest of the XMM slot.
+        let off = Self::xmm_ctx_offset(dst_idx);
+        match size {
+            OpSize::B8 => self.emitter.str_d(dst_v, Reg::x(28), off),
+            OpSize::B4 => self.emitter.str_s(dst_v, Reg::x(28), off),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        Ok(())
+    }
+
     /// BSR / BSF — bit-scan reverse / forward.
     /// BSR: index of highest set bit (=> 63 - clz(x) for B8, 31 - clz(x) for B4).
     /// BSF: index of lowest set bit (=> clz(rbit(x))).
@@ -1834,6 +1904,14 @@ enum PackedLogic {
     Xor,
     And,
     Or,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FpOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone, Copy)]
