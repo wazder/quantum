@@ -25,6 +25,7 @@ pub mod time;
 pub mod user32;
 pub mod vm;
 pub mod winmm;
+pub mod ws2_32;
 
 pub use heap::{GetProcessHeap, HeapAlloc, HeapFree};
 pub use process::{ExitProcess, ProcessExit};

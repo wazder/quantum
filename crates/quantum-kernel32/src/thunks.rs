@@ -62,6 +62,9 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("wldap32.dll") {
         return crate::misc_win::resolve_wldap32(function);
     }
+    if dll.eq_ignore_ascii_case("ws2_32.dll") {
+        return crate::ws2_32::resolve(function);
+    }
     None
 }
 
