@@ -622,6 +622,47 @@ impl Emitter {
         debug_assert!(offset.is_multiple_of(2));
         self.ldst_uoff(0b01, 0, 0b00, offset / 2, rn, rt);
     }
+
+    // NEON / SIMD&FP loads and stores (unsigned offset). The Reg's u8
+    // index just selects V0..V31; the encoder bit field is the same as
+    // the GPR class.
+
+    /// LDR Qt, [Xn, #offset] — load 128 bits.
+    pub fn ldr_q(&mut self, vt: Reg, rn: Reg, offset: u32) {
+        debug_assert!(offset.is_multiple_of(16));
+        self.ldst_uoff(0b00, 1, 0b11, offset / 16, rn, vt);
+    }
+
+    /// STR Qt, [Xn, #offset] — store 128 bits.
+    pub fn str_q(&mut self, vt: Reg, rn: Reg, offset: u32) {
+        debug_assert!(offset.is_multiple_of(16));
+        self.ldst_uoff(0b00, 1, 0b10, offset / 16, rn, vt);
+    }
+
+    /// LDR Dt, [Xn, #offset] — load 64 bits into low half of V; zero
+    /// upper half.
+    pub fn ldr_d(&mut self, vt: Reg, rn: Reg, offset: u32) {
+        debug_assert!(offset.is_multiple_of(8));
+        self.ldst_uoff(0b11, 1, 0b01, offset / 8, rn, vt);
+    }
+
+    /// STR Dt, [Xn, #offset] — store low 64 bits of V.
+    pub fn str_d(&mut self, vt: Reg, rn: Reg, offset: u32) {
+        debug_assert!(offset.is_multiple_of(8));
+        self.ldst_uoff(0b11, 1, 0b00, offset / 8, rn, vt);
+    }
+
+    /// LDR St, [Xn, #offset] — load 32 bits.
+    pub fn ldr_s(&mut self, vt: Reg, rn: Reg, offset: u32) {
+        debug_assert!(offset.is_multiple_of(4));
+        self.ldst_uoff(0b10, 1, 0b01, offset / 4, rn, vt);
+    }
+
+    /// STR St, [Xn, #offset] — store low 32 bits of V.
+    pub fn str_s(&mut self, vt: Reg, rn: Reg, offset: u32) {
+        debug_assert!(offset.is_multiple_of(4));
+        self.ldst_uoff(0b10, 1, 0b00, offset / 4, rn, vt);
+    }
 }
 
 // =============== Load/Store pair ===============

@@ -121,6 +121,9 @@ impl<'a> Lifter<'a> {
             Op::Xchg => self.lift_xchg(inst),
             Op::Bsr => self.lift_bitscan(inst, true),
             Op::Bsf => self.lift_bitscan(inst, false),
+            Op::MovqXmm => self.lift_movq_xmm(inst),
+            Op::MovsdXmm => self.lift_movsd_xmm(inst),
+            Op::MovssXmm => self.lift_movss_xmm(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -665,6 +668,7 @@ impl<'a> Lifter<'a> {
                 };
                 self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
             }
+            _ => return Err(LifterError::Unsupported(inst.op)),
         }
         // ADCS Xd, Xn, Xm = 0xBA00_0000 | (Rm<<16) | (Rn<<5) | Rd
         // SBCS Xd, Xn, Xm = 0xFA00_0000 | (Rm<<16) | (Rn<<5) | Rd
@@ -782,6 +786,180 @@ impl<'a> Lifter<'a> {
                 Ok(())
             }
             _ => Err(LifterError::Unsupported(inst.op)),
+        }
+    }
+
+    /// Byte offset of XMM register `n` within `GuestContext`.
+    ///   gprs (16*8=128) + rip(8) + flags(8) + gs_base(8) + fs_base(8) = 160
+    ///   xmms[n] at 160 + n*16.
+    fn xmm_ctx_offset(n: u8) -> u32 {
+        160 + (n as u32) * 16
+    }
+
+    /// MOVQ — moves a 64-bit value between an XMM register and either a
+    /// GPR/memory (movd/movq with 66 prefix) or another XMM (F3 prefix).
+    /// For B4 the operand is 32-bit (MOVD). For the XMM-dest direction
+    /// the high bits of the destination XMM are zeroed.
+    fn lift_movq_xmm(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let size = match (dst, src) {
+            (Operand::XmmReg(_, s), _) | (_, Operand::XmmReg(_, s)) => s,
+            _ => return Err(LifterError::Unsupported(Op::MovqXmm)),
+        };
+        // V16 is our scratch V-register (matching scratch X16 by index).
+        let scratch_v = Reg::x(16);
+        match (dst, src) {
+            // XMM, XMM (F3 variant) — copy 64 bits, zero upper.
+            (Operand::XmmReg(d, _), Operand::XmmReg(s, _)) => {
+                // LDR Dn from src slot (zero-extends to Q), STR to dst slot.
+                self.emitter
+                    .ldr_d(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s));
+                // Zero upper half of dst by storing the loaded D, then
+                // explicitly zero bytes 8..15 via STR Xzr.
+                self.emitter
+                    .str_d(scratch_v, Reg::x(28), Self::xmm_ctx_offset(d));
+                self.emitter
+                    .str64(Reg::XZR, Reg::x(28), Self::xmm_ctx_offset(d) + 8);
+                Ok(())
+            }
+            // XMM, GPR — write GPR's value into the XMM low 64 bits,
+            // zero upper 64. B4 stores only the low 32 and zeroes the
+            // top 96.
+            (Operand::XmmReg(d, _), Operand::Reg(rs, _)) => {
+                let hs = host_reg(rs);
+                let off = Self::xmm_ctx_offset(d);
+                match size {
+                    OpSize::B8 => {
+                        self.emitter.str64(hs, Reg::x(28), off);
+                        self.emitter.str64(Reg::XZR, Reg::x(28), off + 8);
+                    }
+                    OpSize::B4 => {
+                        self.emitter.str32(hs, Reg::x(28), off);
+                        self.emitter.str32(Reg::XZR, Reg::x(28), off + 4);
+                        self.emitter.str64(Reg::XZR, Reg::x(28), off + 8);
+                    }
+                    _ => return Err(LifterError::Unsupported(Op::MovqXmm)),
+                }
+                Ok(())
+            }
+            // XMM, [mem] — load mem into scratch V, store to dst slot, zero upper.
+            (Operand::XmmReg(d, _), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                let off = Self::xmm_ctx_offset(d);
+                match size {
+                    OpSize::B8 => {
+                        self.emitter.ldr64(Reg::X16, Reg::X17, leftover);
+                        self.emitter.str64(Reg::X16, Reg::x(28), off);
+                        self.emitter.str64(Reg::XZR, Reg::x(28), off + 8);
+                    }
+                    OpSize::B4 => {
+                        self.emitter.ldr32(Reg::X16, Reg::X17, leftover);
+                        self.emitter.str32(Reg::X16, Reg::x(28), off);
+                        self.emitter.str32(Reg::XZR, Reg::x(28), off + 4);
+                        self.emitter.str64(Reg::XZR, Reg::x(28), off + 8);
+                    }
+                    _ => return Err(LifterError::Unsupported(Op::MovqXmm)),
+                }
+                Ok(())
+            }
+            // GPR, XMM — read XMM low 32/64 into GPR.
+            (Operand::Reg(rd, _), Operand::XmmReg(s, _)) => {
+                let hd = host_reg(rd);
+                let off = Self::xmm_ctx_offset(s);
+                match size {
+                    OpSize::B8 => self.emitter.ldr64(hd, Reg::x(28), off),
+                    OpSize::B4 => self.emitter.ldr32(hd, Reg::x(28), off),
+                    _ => return Err(LifterError::Unsupported(Op::MovqXmm)),
+                }
+                Ok(())
+            }
+            // [mem], XMM — read XMM low and store to mem.
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::XmmReg(s, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                let off = Self::xmm_ctx_offset(s);
+                match size {
+                    OpSize::B8 => {
+                        self.emitter.ldr64(Reg::X16, Reg::x(28), off);
+                        self.emitter.str64(Reg::X16, Reg::X17, leftover);
+                    }
+                    OpSize::B4 => {
+                        self.emitter.ldr32(Reg::X16, Reg::x(28), off);
+                        self.emitter.str32(Reg::X16, Reg::X17, leftover);
+                    }
+                    _ => return Err(LifterError::Unsupported(Op::MovqXmm)),
+                }
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::MovqXmm)),
+        }
+    }
+
+    /// MOVSD — 64-bit scalar double move. Same data movement as MOVQ
+    /// but with subtly different upper-half semantics:
+    ///   - XMM, XMM: high 64 bits of dest *preserved* (unlike MOVQ).
+    ///   - XMM, [mem]: high 64 bits of dest *zeroed*.
+    ///   - [mem], XMM: store low 64 bits.
+    fn lift_movsd_xmm(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        match (dst, src) {
+            (Operand::XmmReg(d, _), Operand::XmmReg(s, _)) => {
+                // High half preserved — copy only low 64 bits.
+                self.emitter
+                    .ldr64(Reg::X16, Reg::x(28), Self::xmm_ctx_offset(s));
+                self.emitter
+                    .str64(Reg::X16, Reg::x(28), Self::xmm_ctx_offset(d));
+                Ok(())
+            }
+            (Operand::XmmReg(d, _), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr64(Reg::X16, Reg::X17, leftover);
+                let off = Self::xmm_ctx_offset(d);
+                self.emitter.str64(Reg::X16, Reg::x(28), off);
+                self.emitter.str64(Reg::XZR, Reg::x(28), off + 8);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::XmmReg(s, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter
+                    .ldr64(Reg::X16, Reg::x(28), Self::xmm_ctx_offset(s));
+                self.emitter.str64(Reg::X16, Reg::X17, leftover);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::MovsdXmm)),
+        }
+    }
+
+    /// MOVSS — 32-bit scalar single move. Like MOVSD but 32-bit.
+    fn lift_movss_xmm(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        match (dst, src) {
+            (Operand::XmmReg(d, _), Operand::XmmReg(s, _)) => {
+                self.emitter
+                    .ldr32(Reg::X16, Reg::x(28), Self::xmm_ctx_offset(s));
+                self.emitter
+                    .str32(Reg::X16, Reg::x(28), Self::xmm_ctx_offset(d));
+                Ok(())
+            }
+            (Operand::XmmReg(d, _), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr32(Reg::X16, Reg::X17, leftover);
+                let off = Self::xmm_ctx_offset(d);
+                self.emitter.str32(Reg::X16, Reg::x(28), off);
+                self.emitter.str32(Reg::XZR, Reg::x(28), off + 4);
+                self.emitter.str64(Reg::XZR, Reg::x(28), off + 8);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::XmmReg(s, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter
+                    .ldr32(Reg::X16, Reg::x(28), Self::xmm_ctx_offset(s));
+                self.emitter.str32(Reg::X16, Reg::X17, leftover);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::MovssXmm)),
         }
     }
 

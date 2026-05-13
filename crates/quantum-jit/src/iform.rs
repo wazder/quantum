@@ -68,6 +68,11 @@ pub enum Seg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     Reg(GpReg, OpSize),
+    /// XMM register: 0..15. The `OpSize` carries the access width
+    /// (B4 = SS scalar, B8 = SD scalar / MOVQ, B16 isn't a B-enum
+    /// value — packed 128-bit moves represent themselves as a custom
+    /// `MovdqaXmm` op rather than overloading the size field).
+    XmmReg(u8, OpSize),
     Imm(i64, OpSize),
     Mem(Mem),
     /// RIP-relative memory: effective address = next_rip + disp.

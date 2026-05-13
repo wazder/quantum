@@ -65,6 +65,13 @@ pub struct GuestContext {
     /// the TIB; Win64 leaves it free for user code. Most modern guests
     /// don't read fs; we still carry it for completeness.
     pub fs_base: u64,
+    /// XMM0..XMM15 (each 128 bits). Stored as 16-byte aligned blobs;
+    /// the lifter generates LDR Qd / STR Qd against `ctx + offsetof(xmms[n])`
+    /// for each XMM operation. Unlike GPRs, XMM regs aren't pinned to
+    /// host NEON registers — the spill/reload cost was deemed not worth
+    /// the 16-Q-pair prologue/epilogue overhead given how rarely most
+    /// blocks touch XMMs. We may revisit when SSE-heavy guests show up.
+    pub xmms: [[u8; 16]; 16],
 }
 
 /// Call a JIT'd block with the supplied `GuestContext`. The block

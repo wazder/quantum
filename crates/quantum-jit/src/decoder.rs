@@ -699,6 +699,28 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    /// ModRM decode variant that returns the rm side as an `XmmReg`
+    /// when mod==11. Memory operand mode falls through to the same
+    /// path as GPR decoding.
+    fn decode_modrm_xmm(
+        &mut self,
+        p: &Prefixes,
+        size: OpSize,
+    ) -> Result<(Operand, u8 /* reg field */)> {
+        let modrm = self.read_u8()?;
+        let mod_ = modrm >> 6;
+        let reg = (modrm >> 3) & 0b111;
+        let rm = modrm & 0b111;
+        let rm_op = if mod_ == 0b11 {
+            let r = ((p.rex.b as u8) << 3) | rm;
+            Operand::XmmReg(r, size)
+        } else {
+            self.decode_rm_memory(p, mod_, rm, size)?
+        };
+        let reg_idx = ((p.rex.r as u8) << 3) | reg;
+        Ok((rm_op, reg_idx))
+    }
+
     fn decode_secondary(&mut self, p: &Prefixes, rip: u64) -> Result<Inst> {
         let opcode = self.read_u8()?;
         match opcode {
@@ -706,6 +728,48 @@ impl<'a> Decoder<'a> {
             0x05 => Ok(make(Op::Syscall, [None, None, None], rip)),
             // 0F 0B UD2
             0x0B => Ok(make(Op::Ud2, [None, None, None], rip)),
+            // SSE2 scalar moves with size determined by REP/OSIZE prefixes.
+            //   66 0F 10 /r is unused (movupd); skip for now.
+            //   F2 0F 10 /r MOVSD xmm, xmm/m64
+            //   F3 0F 10 /r MOVSS xmm, xmm/m32
+            0x10 if p.repne || p.repe => {
+                let size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                let op = if p.repne { Op::MovsdXmm } else { Op::MovssXmm };
+                Ok(make(op, [Some(xmm), Some(rm), None], rip))
+            }
+            //   F2 0F 11 /r MOVSD xmm/m64, xmm
+            //   F3 0F 11 /r MOVSS xmm/m32, xmm
+            0x11 if p.repne || p.repe => {
+                let size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                let op = if p.repne { Op::MovsdXmm } else { Op::MovssXmm };
+                Ok(make(op, [Some(rm), Some(xmm), None], rip))
+            }
+            // 66 0F 6E /r MOVD xmm, r/m32  (with REX.W => MOVQ xmm, r/m64)
+            // Note: rm here is a *GPR* or memory, not an XMM, when used
+            // as a movd/movq across the GPR/XMM boundary.
+            0x6E if p.osize => {
+                let size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                Ok(make(Op::MovqXmm, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F 7E /r MOVD r/m32, xmm  (with REX.W => MOVQ r/m64, xmm)
+            // F3 0F 7E /r MOVQ xmm, xmm/m64 (alternate form, 64-bit always)
+            0x7E if p.osize => {
+                let size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                Ok(make(Op::MovqXmm, [Some(rm), Some(xmm), None], rip))
+            }
+            0x7E if p.repe => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::MovqXmm, [Some(xmm), Some(rm), None], rip))
+            }
             // 0F 1F /0 multi-byte NOP (variable length)
             0x1F => {
                 let _ = self.decode_modrm(p, OpSize::B4)?;
@@ -1021,6 +1085,7 @@ impl<'a> Decoder<'a> {
 fn rewidth(op: Operand, size: OpSize) -> Operand {
     match op {
         Operand::Reg(r, _) => Operand::Reg(r, size),
+        Operand::XmmReg(r, _) => Operand::XmmReg(r, size),
         Operand::Mem(mut m) => {
             m.size = size;
             Operand::Mem(m)
@@ -1317,6 +1382,47 @@ mod tests {
         assert_eq!(i.op, Op::Cmov(Cond::NE));
         assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
         assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rcx, OpSize::B4)));
+    }
+
+    #[test]
+    fn movq_xmm0_rax() {
+        // 66 48 0F 6E C0 -> movq xmm0, rax
+        let i = dec(&[0x66, 0x48, 0x0F, 0x6E, 0xC0]);
+        assert_eq!(i.op, Op::MovqXmm);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rax, OpSize::B8)));
+    }
+
+    #[test]
+    fn movq_rax_xmm0() {
+        // 66 48 0F 7E C0 -> movq rax, xmm0
+        let i = dec(&[0x66, 0x48, 0x0F, 0x7E, 0xC0]);
+        assert_eq!(i.op, Op::MovqXmm);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(0, OpSize::B8)));
+    }
+
+    #[test]
+    fn movsd_xmm_xmm() {
+        // F2 0F 10 C1 -> movsd xmm0, xmm1
+        let i = dec(&[0xF2, 0x0F, 0x10, 0xC1]);
+        assert_eq!(i.op, Op::MovsdXmm);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn movss_mem_xmm() {
+        // F3 0F 11 04 24 -> movss [rsp], xmm0
+        let i = dec(&[0xF3, 0x0F, 0x11, 0x04, 0x24]);
+        assert_eq!(i.op, Op::MovssXmm);
+        if let Some(Operand::Mem(m)) = i.operands[0] {
+            assert_eq!(m.base, Some(GpReg::Rsp));
+            assert_eq!(m.size, OpSize::B4);
+        } else {
+            panic!("expected Mem dst");
+        }
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(0, OpSize::B4)));
     }
 
     #[test]
