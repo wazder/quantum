@@ -133,12 +133,22 @@ impl<'a> Lifter<'a> {
     /// Materialise `m`'s effective address into `xtmp`, returning the
     /// leftover constant displacement that the caller may fold into the
     /// LDR/STR unsigned offset (0 if everything was added in).
+    ///
+    /// Segment overrides (`gs:`/`fs:`) add the corresponding base. The
+    /// dispatcher prologue pins gs_base into X24 and fs_base into X25
+    /// before any block body runs; non-dispatcher builds emit segment
+    /// overrides only by accident and find zero in those regs.
     fn mem_address_into(&mut self, m: Mem, xtmp: Reg) -> u32 {
-        if let Some(base) = m.base {
-            self.emitter.mov64(xtmp, host_reg(base));
-        } else {
-            // No base — start from zero.
-            self.emitter.load_const64(xtmp, 0);
+        match m.base {
+            Some(base) => self.emitter.mov64(xtmp, host_reg(base)),
+            None => self.emitter.load_const64(xtmp, 0),
+        }
+        if let Some(seg) = m.seg {
+            let seg_reg = match seg {
+                crate::iform::Seg::Gs => Reg::x(24),
+                crate::iform::Seg::Fs => Reg::x(25),
+            };
+            self.emitter.add64(xtmp, xtmp, seg_reg);
         }
 
         if let Some(index) = m.index {

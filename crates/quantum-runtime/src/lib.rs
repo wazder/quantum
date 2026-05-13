@@ -14,6 +14,7 @@ pub mod dispatcher;
 pub mod fd;
 pub mod guest_stack;
 pub mod mem;
+pub mod peb;
 pub mod sys;
 pub mod thread;
 
@@ -24,3 +25,4 @@ pub use dispatcher::{
 pub use fd::{HostFd, OpenFlags, StdStream};
 pub use guest_stack::{DEFAULT_GUEST_STACK_SIZE, GuestStack};
 pub use mem::{MachVmManager, MemoryManager, Protection, Region};
+pub use peb::ProcessControlBlock;

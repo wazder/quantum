@@ -103,13 +103,20 @@ pub fn translate_for_dispatcher(
 
     // ---- Dispatcher prologue ----
     // Save host callee-saved regs we touch:
-    //   X19 (guest RSP), X28 (ctx pointer), X29 (FP), X30 (LR)
+    //   X19 (guest RSP), X24 (gs_base), X25 (fs_base), X28 (ctx ptr),
+    //   X29 (FP), X30 (LR).
     // Then capture the AAPCS64 arg0 (X0 = *GuestContext) into X28 and
-    // reload all 16 guest GPRs from ctx.
+    // reload all 16 guest GPRs + gs_base + fs_base from ctx.
     emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
     emitter.stp64_pre(Reg::x(19), Reg::x(28), Reg::SP, -16);
+    emitter.stp64_pre(Reg::x(24), Reg::x(25), Reg::SP, -16);
     emitter.mov64(Reg::x(28), Reg::X0);
     emit_ctx_to_regs(&mut emitter);
+    // gs_base / fs_base sit just past flags in GuestContext (offsets
+    // 144 / 152). User code never writes to them so the epilogue
+    // doesn't spill back.
+    emitter.ldr64(Reg::x(24), Reg::x(28), 144);
+    emitter.ldr64(Reg::x(25), Reg::x(28), 152);
 
     // ---- Body ----
     let last = insts.len() - 1;
@@ -248,6 +255,7 @@ fn emit_regs_to_ctx(emitter: &mut Emitter) {
 /// pre-loaded with the next-block guest RIP.
 fn emit_host_epilogue(emitter: &mut Emitter) {
     use crate::emitter::Reg;
+    emitter.ldp64_post(Reg::x(24), Reg::x(25), Reg::SP, 16);
     emitter.ldp64_post(Reg::x(19), Reg::x(28), Reg::SP, 16);
     emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
     emitter.ret();

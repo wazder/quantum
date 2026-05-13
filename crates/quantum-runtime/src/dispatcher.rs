@@ -57,6 +57,14 @@ pub struct GuestContext {
     pub rip: u64,
     /// EFLAGS image (only NZCV is currently meaningful).
     pub flags: u64,
+    /// Effective base of `gs:[…]` accesses. On Win64 this is the
+    /// guest's TEB. The lifter adds `gs_base + disp` for any memory
+    /// operand whose segment override is GS.
+    pub gs_base: u64,
+    /// Effective base of `fs:[…]` accesses. Win32 had this point at
+    /// the TIB; Win64 leaves it free for user code. Most modern guests
+    /// don't read fs; we still carry it for completeness.
+    pub fs_base: u64,
 }
 
 /// Call a JIT'd block with the supplied `GuestContext`. The block
