@@ -17,6 +17,27 @@
 )]
 
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+// =============== SEH filter registration ===============
+//
+// Sekiro (and most Windows binaries with custom DRM) installs an
+// unhandled-exception filter via SetUnhandledExceptionFilter. The
+// dispatcher needs to know that pointer so a future SEH layer can
+// invoke it when the JIT traps an int3 / SIGSEGV / SIGTRAP.
+//
+// We just store the most recently registered pointer; chained filters
+// aren't supported yet. The previous pointer is returned (per Windows
+// semantics) so chaining-aware callers can hold onto it themselves.
+
+static UNHANDLED_EXCEPTION_FILTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Read the currently registered unhandled-exception filter (a guest
+/// function pointer using Win64 calling convention). Returns 0 if
+/// none has been set.
+pub fn registered_unhandled_filter() -> u64 {
+    UNHANDLED_EXCEPTION_FILTER.load(Ordering::SeqCst) as u64
+}
 
 // =============== SEH / unwinding ===============
 //
@@ -98,9 +119,15 @@ pub extern "C" fn UnhandledExceptionFilter(_info: *mut c_void) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn SetUnhandledExceptionFilter(_handler: *mut c_void) -> *const c_void {
-    // Returning NULL signals "no previous handler".
-    core::ptr::null()
+pub extern "C" fn SetUnhandledExceptionFilter(handler: *mut c_void) -> *const c_void {
+    let prev = UNHANDLED_EXCEPTION_FILTER.swap(handler as usize, Ordering::SeqCst);
+    if std::env::var("QUANTUM_TRACE").is_ok() {
+        eprintln!(
+            "[trace] SetUnhandledExceptionFilter({:#x}) -> prev={:#x}",
+            handler as usize, prev,
+        );
+    }
+    prev as *const c_void
 }
 
 // =============== CRT initialisation ===============
