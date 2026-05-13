@@ -63,6 +63,8 @@ impl<'a> Lifter<'a> {
             Op::Xor => self.lift_xor(inst),
             Op::Lea => self.lift_lea(inst),
             Op::Cmp => self.lift_cmp(inst),
+            Op::Push => self.lift_push(inst),
+            Op::Pop => self.lift_pop(inst),
             Op::CallIndirect => self.lift_call_indirect(inst),
             Op::Ret => {
                 // For now treat RET as a host RET. Once we wire the
@@ -227,6 +229,39 @@ impl<'a> Lifter<'a> {
         self.emitter.blr(Reg::X16);
         self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
         Ok(())
+    }
+
+    /// PUSH r64 / PUSH imm.
+    ///   sub x19, x19, #8
+    ///   str <src>, [x19]
+    fn lift_push(&mut self, inst: &Inst) -> LifterResult<()> {
+        let src = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        self.emitter.sub64_imm(Reg::x(19), Reg::x(19), 8);
+        match src {
+            Operand::Reg(rs, _) => {
+                self.emitter.str64(host_reg(rs), Reg::x(19), 0);
+            }
+            Operand::Imm(imm, _) => {
+                // Materialise the immediate into a scratch reg first.
+                self.emitter.load_const64(Reg::X16, imm as u64);
+                self.emitter.str64(Reg::X16, Reg::x(19), 0);
+            }
+            _ => return Err(LifterError::Unsupported(Op::Push)),
+        }
+        Ok(())
+    }
+
+    /// POP r64.
+    ///   ldr <dst>, [x19]
+    ///   add x19, x19, #8
+    fn lift_pop(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        if let Operand::Reg(rd, _) = dst {
+            self.emitter.ldr64(host_reg(rd), Reg::x(19), 0);
+            self.emitter.add64_imm(Reg::x(19), Reg::x(19), 8);
+            return Ok(());
+        }
+        Err(LifterError::Unsupported(Op::Pop))
     }
 
     fn lift_xor(&mut self, inst: &Inst) -> LifterResult<()> {

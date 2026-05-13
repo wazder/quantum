@@ -67,6 +67,25 @@ pub fn translate(
     start_rip: u64,
     is_terminator: impl Fn(&Op) -> bool,
 ) -> Result<Block, BlockError> {
+    translate_with_stack(bytes, start_rip, None, is_terminator)
+}
+
+/// Like `translate`, but also emits a prologue that:
+///   * saves the host's `X19` (callee-saved) on the host stack
+///   * loads `stack_top` into `X19` so the guest's pinned RSP points at
+///     a real guest stack region
+///
+/// Pass `Some(stack_top)` when the block contains PUSH/POP or any other
+/// op that touches RSP. The host's X19 is restored if the lifted block
+/// emits a RET; blocks that exit via ExitProcess longjmp don't reach
+/// the restore (and don't need it — the surrounding setjmp restores
+/// callee-saved regs).
+pub fn translate_with_stack(
+    bytes: &[u8],
+    start_rip: u64,
+    stack_top: Option<u64>,
+    is_terminator: impl Fn(&Op) -> bool,
+) -> Result<Block, BlockError> {
     // Pass 1: decode every instruction up to and including the
     // terminator.
     let mut insts: Vec<Inst> = Vec::new();
@@ -85,6 +104,19 @@ pub fn translate(
     // instruction so intra-block branches can name their target by
     // guest RIP.
     let mut emitter = Emitter::new();
+
+    // Optional guest-stack prologue: save host X19, then load
+    // stack_top into X19 so the lifter's PUSH/POP find a real stack.
+    // X20 is paired purely to keep the stack 16-byte aligned.
+    if let Some(top) = stack_top {
+        emitter.stp64_pre(
+            crate::emitter::Reg::x(19),
+            crate::emitter::Reg::x(20),
+            crate::emitter::Reg::SP,
+            -16,
+        );
+        emitter.load_const64(crate::emitter::Reg::x(19), top);
+    }
     let mut labels: Vec<(u64, Label)> = Vec::with_capacity(insts.len());
     for inst in &insts {
         labels.push((inst.guest_rip, emitter.make_label()));
