@@ -87,20 +87,38 @@ pub extern "C" fn ExitProcess(exit_code: u32) -> ! {
 /// short-circuited path.
 pub fn run_with_exit_trap<F: FnOnce()>(body: F) -> u32 {
     install_crash_handler();
-    EXIT_CODE.store(0, Ordering::SeqCst);
-    EXIT_ARMED.store(1, Ordering::SeqCst);
+    // Snapshot the previous trap state so nested calls restore on exit.
+    // EXIT_ENV is overwritten by setjmp here; we copy the prior bytes
+    // out and put them back on the way out. This makes nested
+    // run_with_exit_trap calls compose: an inner crash / ExitProcess
+    // longjmps to the inner setjmp, the inner returns to its caller,
+    // and the outer's jmp_buf is restored bit-for-bit for any future
+    // crash to fire against it.
+    let mut saved_env: [u8; 512] = [0; 512];
+    unsafe {
+        let env_ptr = EXIT_ENV.as_ptr() as *const u8;
+        core::ptr::copy_nonoverlapping(env_ptr, saved_env.as_mut_ptr(), 512);
+    }
+    let saved_code = EXIT_CODE.swap(0, Ordering::SeqCst);
+    let saved_armed = EXIT_ARMED.swap(1, Ordering::SeqCst);
+
     let rc = setjmp(EXIT_ENV.as_ptr());
-    if rc == 0 {
+    let result = if rc == 0 {
         body();
-        EXIT_ARMED.store(0, Ordering::SeqCst);
-        // Guest returned without calling ExitProcess: signal that to the
-        // caller via a sentinel exit code distinct from anything a guest
-        // is plausibly going to set.
         u32::MAX
     } else {
-        EXIT_ARMED.store(0, Ordering::SeqCst);
         EXIT_CODE.load(Ordering::SeqCst)
+    };
+
+    // Restore caller's trap state.
+    unsafe {
+        let env_ptr = EXIT_ENV.as_ptr() as *mut u8;
+        core::ptr::copy_nonoverlapping(saved_env.as_ptr(), env_ptr, 512);
     }
+    EXIT_CODE.store(saved_code, Ordering::SeqCst);
+    EXIT_ARMED.store(saved_armed, Ordering::SeqCst);
+
+    result
 }
 
 // ---------- Crash handler ----------

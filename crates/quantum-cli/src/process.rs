@@ -194,9 +194,11 @@ fn load_side_dlls(
 }
 
 /// Run a side-loaded DLL's TLS callbacks then its DllMain, both with
-/// PROCESS_ATTACH semantics. Any fault inside is reported via trace
-/// but doesn't abort the whole init sequence — most game code keeps
-/// working even if a single DLL fails to init.
+/// PROCESS_ATTACH semantics. Each call runs inside its own
+/// `run_with_exit_trap` so a fault in one init doesn't abort the
+/// whole sequence — the inner trap longjmps to its own setjmp slot
+/// (saved/restored by the trap helper) and the outer caller's trap
+/// state is untouched.
 fn init_side_module(disp: &mut Dispatcher, sm: &SideModule, ctx: &mut GuestContext, trace: bool) {
     if let Ok(Some(tls)) = quantum_loader::tls::parse(&sm.image) {
         for cb_rva in &tls.callbacks {
@@ -207,10 +209,17 @@ fn init_side_module(disp: &mut Dispatcher, sm: &SideModule, ctx: &mut GuestConte
             ctx.gprs[1] = sm.image.actual_base; // RCX = hinstDLL
             ctx.gprs[2] = 1; // RDX = DLL_PROCESS_ATTACH
             ctx.gprs[8] = 0; // R8 = reserved
-            if let Err(e) = invoke_guest_function(disp, &sm.image, ctx, cb_va)
-                && trace
+            let rc = run_with_exit_trap(|| {
+                let _ = invoke_guest_function(disp, &sm.image, ctx, cb_va);
+            });
+            if trace
+                && rc == 0xFFFF_FFFE
+                && let Some(crash) = take_crash_info()
             {
-                eprintln!("[trace] {} TLS cb errored: {e}", sm.name);
+                eprintln!(
+                    "[trace] {} TLS cb faulted sig {} addr {:#x}",
+                    sm.name, crash.sig, crash.fault_addr
+                );
             }
         }
     }
@@ -222,10 +231,17 @@ fn init_side_module(disp: &mut Dispatcher, sm: &SideModule, ctx: &mut GuestConte
         ctx.gprs[1] = sm.image.actual_base;
         ctx.gprs[2] = 1;
         ctx.gprs[8] = 0;
-        if let Err(e) = invoke_guest_function(disp, &sm.image, ctx, entry_va)
-            && trace
+        let rc = run_with_exit_trap(|| {
+            let _ = invoke_guest_function(disp, &sm.image, ctx, entry_va);
+        });
+        if trace
+            && rc == 0xFFFF_FFFE
+            && let Some(crash) = take_crash_info()
         {
-            eprintln!("[trace] {} DllMain errored: {e}", sm.name);
+            eprintln!(
+                "[trace] {} DllMain faulted sig {} addr {:#x}",
+                sm.name, crash.sig, crash.fault_addr
+            );
         }
     }
 }
@@ -368,12 +384,12 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
         eprintln!("[trace] entering JIT at {entry_va:#x}");
     }
 
-    // DLL init phase is gated behind QUANTUM_RUN_DLL_INIT because nested
-    // crash handling isn't wired yet — a fault inside any DllMain or
-    // TLS callback longjmps out of the *outer* run_with_exit_trap and
-    // aborts the whole run. With the env var off (default) we skip the
-    // inits; the main entry still gets normal SEH coverage.
-    let run_dll_init = std::env::var("QUANTUM_RUN_DLL_INIT").is_ok();
+    // DLL init phase is on by default now that run_with_exit_trap
+    // saves/restores its setjmp slot — a faulting DllMain longjmps to
+    // its own inner trap, the outer main-entry trap stays armed. Can
+    // be force-disabled with QUANTUM_SKIP_DLL_INIT=1 if it ever
+    // misbehaves for a specific binary.
+    let run_dll_init = std::env::var("QUANTUM_SKIP_DLL_INIT").is_err();
     let mut exit_code = run_with_exit_trap(|| {
         if run_dll_init {
             for sm in &side_modules {
