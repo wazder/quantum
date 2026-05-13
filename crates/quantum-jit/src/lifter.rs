@@ -166,6 +166,7 @@ impl<'a> Lifter<'a> {
             Op::PsrldqImm => self.lift_pshift_dq(inst, false),
             Op::PunpckLow(lane) => self.lift_punpck(inst, lane, false),
             Op::PunpckHigh(lane) => self.lift_punpck(inst, lane, true),
+            Op::PmovmskB => self.lift_pmovmskb(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1295,6 +1296,72 @@ impl<'a> Lifter<'a> {
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
+        Ok(())
+    }
+
+    /// PMOVMSKB r32, xmm — pack the high bit of each byte in the XMM
+    /// source into bits 0..15 of the GPR (clearing upper bits). NEON
+    /// has no single equivalent; the canonical sequence is:
+    ///   1. SSHR Vt.16B, Vsrc.16B, #7    ; each byte = 0xFF / 0x00
+    ///   2. AND  Vt.16B, Vt.16B, Vmask   ; mask = [1,2,4,8,16,32,64,128] x2
+    ///   3. ADDV Bd_lo, Vt.8B            ; sum low 8 bytes -> single byte
+    ///   4. EXT  Vt.16B, Vt.16B, Vt.16B, #8
+    ///   5. ADDV Bd_hi, Vt.8B            ; sum (old) high 8 bytes
+    ///   6. UMOV Wlo, V_lo.B[0]
+    ///   7. UMOV Whi, V_hi.B[0]
+    ///   8. BFI  Wdst, Whi, #8, #8       ; combine into 16-bit result
+    ///
+    /// Mask is built by load_const + INS into both D lanes.
+    fn lift_pmovmskb(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let rd = match dst {
+            Operand::Reg(r, _) => host_reg(r),
+            _ => return Err(LifterError::Unsupported(Op::PmovmskB)),
+        };
+        let src_idx = match src {
+            Operand::XmmReg(s, _) => s,
+            _ => return Err(LifterError::Unsupported(Op::PmovmskB)),
+        };
+        let v_t = Reg::x(16);
+        let v_mask = Reg::x(17);
+        let v_hi = Reg::x(18);
+        // Build mask in V17: each byte = 1 << (i & 7).
+        // Two halves of 8 bytes both encode [1,2,4,8,16,32,64,128].
+        // Little-endian u64: byte 0 in lsb. So u64 = 0x80_40_20_10_08_04_02_01.
+        self.emitter.load_const64(Reg::X16, 0x8040_2010_0804_0201);
+        self.emitter.ins_v_d_gpr(v_mask, 0, Reg::X16);
+        self.emitter.ins_v_d_gpr(v_mask, 1, Reg::X16);
+        // Load source vector into V16.
+        self.emitter
+            .ldr_q(v_t, Reg::x(28), Self::xmm_ctx_offset(src_idx));
+        // SSHR V16.16B, V16.16B, #7  -> each byte = 0xFF / 0x00.
+        self.emitter.sshr_v16b(v_t, v_t, 7);
+        // AND V16.16B, V16.16B, V17.16B.
+        self.emitter.and_v16b(v_t, v_t, v_mask);
+        // Save the original V16 because EXT will rotate it. We need both
+        // halves summed independently. ADDV B, V.8B uses only the low 8
+        // bytes of the source vector and writes to V[0].B[0].
+        // So: ADDV B_lo, V_t.8B; then EXT V_hi, V_t, V_t, #8; ADDV B_hi, V_hi.8B.
+        // Use V16 for low half sum (in V16.B[0]) and V18 for high half sum (in V18.B[0]).
+        // Actually ADDV writes to Vd.B[0]; the rest of Vd is unspecified.
+        // Reuse V16 as the destination of the first ADDV — but then V16
+        // no longer holds the AND'd vector. So compute the EXT before
+        // the first ADDV:
+        // Order:
+        //   EXT  V_hi, V_t, V_t, #8       ; v_hi has the (was) high bytes in low half
+        //   ADDV B16, V_t.8B              ; v_t.B[0] = sum of original low 8
+        //   ADDV B18, V_hi.8B             ; v_hi.B[0] = sum of original high 8
+        self.emitter.ext_v16b(v_hi, v_t, v_t, 8);
+        self.emitter.addv_b_v8b(v_t, v_t);
+        self.emitter.addv_b_v8b(v_hi, v_hi);
+        // UMOV Wd, V_t.B[0]   ; low 8 bits of mask
+        self.emitter.umov_w_b(rd, v_t, 0);
+        // UMOV W17, V_hi.B[0] ; high 8 bits
+        // Reuse X17 here (since we don't need v_mask any more).
+        self.emitter.umov_w_b(Reg::X17, v_hi, 0);
+        // BFI Wd, W17, #8, #8 — pack high half into bits 8..15.
+        self.emitter.bfi_w(rd, Reg::X17, 8, 8);
         Ok(())
     }
 

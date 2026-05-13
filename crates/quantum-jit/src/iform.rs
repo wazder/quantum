@@ -265,6 +265,10 @@ pub enum Op {
     PunpckLow(OpSize),
     /// PUNPCKHxx — interleave high lanes.
     PunpckHigh(OpSize),
+    /// PMOVMSKB r32, xmm — extract the high bit of each byte in the
+    /// XMM source into bits 0..15 of the destination GPR; clear upper
+    /// bits. Cornerstone of SIMD strlen/memcmp.
+    PmovmskB,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

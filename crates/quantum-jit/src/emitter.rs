@@ -1106,6 +1106,46 @@ impl Emitter {
     pub fn zip2_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
         self.zip_form(0x4EC0_7800, vd, vn, vm);
     }
+
+    /// SSHR Vd.16B, Vn.16B, #shift (shift in 1..=8).
+    pub fn sshr_v16b(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!((1..=8).contains(&shift));
+        let imm = 16 - shift;
+        let w = 0x4F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// ADDV Bd, Vn.8B — horizontal byte sum of 8 lanes; result in Vd.B[0].
+    pub fn addv_b_v8b(&mut self, vd: Reg, vn: Reg) {
+        let w = 0x0E31_B800 | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// UMOV Wd, Vn.B[lane] — copy one byte from a vector lane into a GPR.
+    pub fn umov_w_b(&mut self, rd: Reg, vn: Reg, lane: u32) {
+        debug_assert!(lane < 16);
+        let imm5 = (lane << 1) | 1; // B selector
+        let w = 0x0E00_3C00 | (imm5 << 16) | ((vn.0 as u32) << 5) | (rd.0 as u32);
+        self.push(w);
+    }
+
+    /// INS Vd.D[lane], Xn — copy a 64-bit GPR into one V-reg D lane.
+    pub fn ins_v_d_gpr(&mut self, vd: Reg, lane: u32, rn: Reg) {
+        debug_assert!(lane < 2);
+        let imm5 = (lane << 4) | 0b01000;
+        let w = 0x4E00_1C00 | (imm5 << 16) | ((rn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// BFI Wd, Wn, #lsb, #width — 32-bit bitfield insert. Alias of
+    /// BFM Wd, Wn, #(-lsb mod 32), #(width-1).
+    pub fn bfi_w(&mut self, rd: Reg, rn: Reg, lsb: u32, width: u32) {
+        debug_assert!(width > 0 && lsb + width <= 32);
+        let immr = (32 - lsb) & 0x1F;
+        let imms = width - 1;
+        let w = 0x3300_0000 | (immr << 16) | (imms << 10) | ((rn.0 as u32) << 5) | (rd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============

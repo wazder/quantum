@@ -849,6 +849,23 @@ impl<'a> Decoder<'a> {
                 };
                 Ok(make(op, [Some(xmm), Some(rm), None], rip))
             }
+            // 66 0F D7 /r PMOVMSKB r32, xmm — extract per-byte high
+            // bits of the XMM into a 16-bit mask in the low half of
+            // the GPR.
+            0xD7 if p.osize => {
+                let modrm = self.read_u8()?;
+                let mod_ = modrm >> 6;
+                let reg = (modrm >> 3) & 0b111;
+                let rm = modrm & 0b111;
+                if mod_ != 0b11 {
+                    return Ok(unhandled(rip));
+                }
+                let xmm_idx = ((p.rex.b as u8) << 3) | rm;
+                let gpr_idx = ((p.rex.r as u8) << 3) | reg;
+                let dst = Operand::Reg(GpReg::from_index(gpr_idx).unwrap(), OpSize::B4);
+                let src = Operand::XmmReg(xmm_idx, OpSize::B8);
+                Ok(make(Op::PmovmskB, [Some(dst), Some(src), None], rip))
+            }
             // 66 0F D5 /r PMULLW — 8-lane 16-bit multiply (low 16).
             0xD5 if p.osize => {
                 let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
@@ -1917,6 +1934,15 @@ mod tests {
         // 66 0F 6C C1 -> punpcklqdq xmm0, xmm1
         let i = dec(&[0x66, 0x0F, 0x6C, 0xC1]);
         assert_eq!(i.op, Op::PunpckLow(OpSize::B8));
+    }
+
+    #[test]
+    fn pmovmskb_eax_xmm() {
+        // 66 0F D7 C1 -> pmovmskb eax, xmm1
+        let i = dec(&[0x66, 0x0F, 0xD7, 0xC1]);
+        assert_eq!(i.op, Op::PmovmskB);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
     }
 
     #[test]
