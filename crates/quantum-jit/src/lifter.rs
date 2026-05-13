@@ -77,6 +77,45 @@ impl<'a> Lifter<'a> {
             Op::Imul if inst.operands[1].is_none() => self.lift_divmul(inst, DivMulKind::Imul1),
             Op::Neg => self.lift_neg(inst),
             Op::Not => self.lift_not(inst),
+            Op::Cdq => {
+                // EDX = (int32)EAX >> 31 sign-extended into upper 32 bits of RDX.
+                // Equivalent: x_rdx = sign-extend low 32 of rax to 64.
+                let rax = host_reg(GpReg::Rax);
+                let rdx = host_reg(GpReg::Rdx);
+                // SBFM Xd, Xn, #31, #31 — extract bit 31 as sign and replicate
+                // would be wrong; we want sign-extend bit 31 to bits 31..63.
+                // Simpler: ASR Xd, (sign-extended rax), #31 — bit 31 broadcast.
+                let sxtw = 0x9340_7C00 | ((rax.raw() as u32) << 5) | (rdx.raw() as u32);
+                self.emitter.raw_word(sxtw);
+                // Then rdx >>= 31 (arith) so the whole 64-bit reg = bit31 of eax replicated.
+                self.emitter
+                    .raw_word(0x9343_FC00 | ((rdx.raw() as u32) << 5) | (rdx.raw() as u32));
+                // Mask EDX to 32 bits since we treat it as 32-bit in CDQ.
+                self.emit_and_imm_lo32(rdx, rdx);
+                Ok(())
+            }
+            Op::Cqo => {
+                // RDX = sign-extension of RAX (bit 63 broadcast across RDX).
+                let rax = host_reg(GpReg::Rax);
+                let rdx = host_reg(GpReg::Rdx);
+                // ASR Xd, Xn, #63 — bit 63 broadcast.
+                // SBFM Xd, Xn, #63, #63.
+                let w = 0x9340_0000
+                    | (63u32 << 16)
+                    | (63u32 << 10)
+                    | ((rax.raw() as u32) << 5)
+                    | (rdx.raw() as u32);
+                self.emitter.raw_word(w);
+                Ok(())
+            }
+            Op::Leave => {
+                // mov rsp, rbp; pop rbp.
+                self.emitter.mov64(Reg::x(19), host_reg(GpReg::Rbp));
+                self.emitter.ldr64(host_reg(GpReg::Rbp), Reg::x(19), 0);
+                self.emitter.add64_imm(Reg::x(19), Reg::x(19), 8);
+                Ok(())
+            }
+            Op::Xchg => self.lift_xchg(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -650,6 +689,45 @@ impl<'a> Lifter<'a> {
                 Ok(())
             }
             _ => Err(LifterError::Unsupported(inst.op)),
+        }
+    }
+
+    /// XCHG. We support the common shapes: reg/reg and reg/mem (mem/reg
+    /// is the same op decoded). x86 XCHG with a memory operand is
+    /// implicitly LOCK'd, which has stronger ordering than a plain LDR
+    /// + STR — for now we ignore that since the JIT runs single-threaded.
+    fn lift_xchg(&mut self, inst: &Inst) -> LifterResult<()> {
+        let a = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let b = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        match (a, b) {
+            (Operand::Reg(ra, _), Operand::Reg(rb, _)) => {
+                if ra == rb {
+                    return Ok(()); // NOP idiom
+                }
+                let ha = host_reg(ra);
+                let hb = host_reg(rb);
+                // tmp = ha; ha = hb; hb = tmp.
+                self.emitter.mov64(Reg::X16, ha);
+                self.emitter.mov64(ha, hb);
+                self.emitter.mov64(hb, Reg::X16);
+                Ok(())
+            }
+            (Operand::Reg(rr, _), m @ (Operand::Mem(_) | Operand::RipRel(_, _)))
+            | (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rr, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let hr = host_reg(rr);
+                // tmp = mem; mem = reg; reg = tmp.
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.store_sized(hr, Reg::X16, leftover, size);
+                self.emitter.mov64(hr, Reg::X17);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::Xchg)),
         }
     }
 
