@@ -160,6 +160,7 @@ impl<'a> Lifter<'a> {
             Op::PsllImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Sll),
             Op::PsrlImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Srl),
             Op::PsraImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Sra),
+            Op::PshufD => self.lift_pshufd(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1289,6 +1290,55 @@ impl<'a> Lifter<'a> {
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
+        Ok(())
+    }
+
+    /// PSHUFD xmm_dst, xmm_src/m128, imm8 — shuffle 4 32-bit lanes.
+    /// imm8 packs four 2-bit source-lane selectors (low 2 bits = dst
+    /// lane 0, ..., bits 6-7 = dst lane 3).
+    ///
+    /// Lowered to 4 NEON INS.S instructions through a scratch V-reg
+    /// so the source isn't clobbered mid-way (important when src and
+    /// dst happen to be the same XMM index).
+    fn lift_pshufd(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let imm = match inst.operands[2] {
+            Some(Operand::Imm(v, _)) => v as u8,
+            _ => return Err(LifterError::Unsupported(Op::PshufD)),
+        };
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(Op::PshufD)),
+        };
+        let src_v = Reg::x(17);
+        let tmp_v = Reg::x(16);
+        // Load source into V17.
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(Op::PshufD)),
+        }
+        // Build the shuffled vector in V16. INS overwrites lanes in
+        // place; we start from a copy of V17 so unselected lanes have
+        // sane (well-defined) values.
+        // Use ORR Vd.16B, Vn.16B, Vn.16B as the "MOV" alias.
+        self.emitter.orr_v16b(tmp_v, src_v, src_v);
+        for dst_lane in 0..4u32 {
+            let src_lane = ((imm >> (dst_lane * 2)) & 0b11) as u32;
+            if src_lane != dst_lane {
+                self.emitter.ins_v_s(tmp_v, dst_lane, src_v, src_lane);
+            }
+        }
+        // Store the shuffled vector into the dst slot.
+        self.emitter
+            .str_q(tmp_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
         Ok(())
     }
 

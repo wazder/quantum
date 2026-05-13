@@ -1038,6 +1038,18 @@ impl Emitter {
         let w = 0x4F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+
+    /// INS Vd.S[dst_lane], Vn.S[src_lane] — copy one 32-bit lane.
+    /// Encoding: 0_1_1_01110_000_imm5_0_imm4_1_Rn_Rd
+    ///   imm5 = (dst_lane<<3) | 4   (the "100" size marker for S)
+    ///   imm4 = src_lane<<2
+    pub fn ins_v_s(&mut self, vd: Reg, dst_lane: u32, vn: Reg, src_lane: u32) {
+        debug_assert!(dst_lane < 4 && src_lane < 4);
+        let imm5 = (dst_lane << 3) | 4;
+        let imm4 = src_lane << 2;
+        let w = 0x6E00_0400 | (imm5 << 16) | (imm4 << 11) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============

@@ -822,6 +822,17 @@ impl<'a> Decoder<'a> {
                     rip,
                 ))
             }
+            // 66 0F 70 /r ib  PSHUFD xmm, xmm/m128, imm8
+            0x70 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                let imm = self.read_u8()? as i64;
+                Ok(make(
+                    Op::PshufD,
+                    [Some(xmm), Some(rm), Some(Operand::Imm(imm, OpSize::B1))],
+                    rip,
+                ))
+            }
             // 66 0F 74/75/76 /r PCMPEQB/W/D — per-lane integer compare-equal.
             0x74 if p.osize => {
                 let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
@@ -1852,6 +1863,16 @@ mod tests {
         // 66 0F 71 E0 03 -> psraw xmm0, 3
         let i = dec(&[0x66, 0x0F, 0x71, 0xE0, 0x03]);
         assert_eq!(i.op, Op::PsraImm(OpSize::B2));
+    }
+
+    #[test]
+    fn pshufd_xmm_xmm_imm() {
+        // 66 0F 70 C1 4E -> pshufd xmm0, xmm1, 0x4E  (lanes [1,0,3,2] — half swap)
+        let i = dec(&[0x66, 0x0F, 0x70, 0xC1, 0x4E]);
+        assert_eq!(i.op, Op::PshufD);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+        assert_eq!(i.operands[2], Some(Operand::Imm(0x4E, OpSize::B1)));
     }
 
     #[test]

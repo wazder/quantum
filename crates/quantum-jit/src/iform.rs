@@ -251,6 +251,9 @@ pub enum Op {
     /// Packed shift right arithmetic by immediate (D and W lanes only
     /// in SSE2 — x86 has no PSRAQ).
     PsraImm(OpSize),
+    /// PSHUFD xmm, xmm/m128, imm8 — shuffle 4 32-bit lanes according
+    /// to the immediate.
+    PshufD,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,
