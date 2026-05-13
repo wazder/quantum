@@ -220,6 +220,7 @@ fn wire_side_module_iats(side_modules: &mut [SideModule], trace: bool) {
                 continue;
             }
         };
+        let unresolved: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
         let resolver = |dll: &str, function: &str| -> Option<u64> {
             if let Some(addr) = resolve(dll, function) {
                 return Some(addr);
@@ -242,6 +243,11 @@ fn wire_side_module_iats(side_modules: &mut [SideModule], trace: bool) {
                 }
                 return None;
             }
+            if trace {
+                unresolved
+                    .borrow_mut()
+                    .push(format!("{dll}!{function}"));
+            }
             None
         };
         if let Err(e) = imports::wire_iat(&mut sm.image, &imp, resolver) {
@@ -249,11 +255,21 @@ fn wire_side_module_iats(side_modules: &mut [SideModule], trace: bool) {
                 eprintln!("[trace] side-dll: {} IAT wire failed: {e}", sm.name);
             }
         } else if trace {
+            let u = unresolved.borrow();
             eprintln!(
-                "[trace] side-dll: {} IAT wired ({} DLLs)",
+                "[trace] side-dll: {} IAT wired ({} DLLs, {} unresolved)",
                 sm.name,
                 imp.dlls.len(),
+                u.len(),
             );
+            if !u.is_empty() {
+                for name in u.iter().take(8) {
+                    eprintln!("[trace]   unresolved: {name}");
+                }
+                if u.len() > 8 {
+                    eprintln!("[trace]   ... and {} more", u.len() - 8);
+                }
+            }
         }
     }
 }

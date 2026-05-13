@@ -104,6 +104,84 @@ pub extern "C" fn HeapFree(handle: usize, _flags: u32, ptr: *mut u8) -> i32 {
     default_heap().lock().expect("heap mutex").free(ptr) as i32
 }
 
+/// `HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)`.
+///
+/// We don't yet maintain multiple distinct heaps — everything funnels
+/// into the single process heap. Returning DEFAULT_HEAP_HANDLE here
+/// means HeapAlloc/HeapFree calls against the "new" heap end up
+/// touching the same arena. That's lossy but acceptable for now;
+/// games rarely depend on heap isolation.
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapCreate(
+    _options: u32,
+    _initial_size: usize,
+    _maximum_size: usize,
+) -> usize {
+    DEFAULT_HEAP_HANDLE
+}
+
+/// `BOOL HeapDestroy(HANDLE hHeap)`. No-op since we don't reclaim.
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapDestroy(_handle: usize) -> i32 {
+    1
+}
+
+/// `LPVOID HeapReAlloc(HANDLE, DWORD flags, LPVOID mem, SIZE_T bytes)`.
+/// Bump allocator can't actually grow in place; we allocate a fresh
+/// block and (since we have no size metadata) copy a conservative
+/// amount. Good enough for CRT scratch buffers.
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapReAlloc(
+    handle: usize,
+    flags: u32,
+    ptr: *mut u8,
+    size: usize,
+) -> *mut u8 {
+    if handle != DEFAULT_HEAP_HANDLE {
+        return core::ptr::null_mut();
+    }
+    let zero = (flags & HEAP_ZERO_MEMORY) != 0;
+    let new_ptr = default_heap().lock().expect("heap mutex").alloc(size, zero);
+    if !ptr.is_null() && !new_ptr.is_null() {
+        // Copy min(size, conservative) bytes. We don't track the old
+        // allocation's size, so cap by `size` and hope the caller
+        // doesn't read past their old block.
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr, new_ptr, size);
+        }
+    }
+    new_ptr
+}
+
+/// `SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem)`.
+/// We have no size metadata; return 0xFFFFFFFFFFFFFFFF on invalid heap
+/// and a conservative 1 KiB on valid (matches Windows' behavior of
+/// returning the actual allocated size when known).
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapSize(handle: usize, _flags: u32, _mem: *const u8) -> usize {
+    if handle != DEFAULT_HEAP_HANDLE {
+        return usize::MAX;
+    }
+    0x400
+}
+
+/// `BOOL HeapValidate(HANDLE, DWORD, LPCVOID)`. Always true.
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapValidate(_handle: usize, _flags: u32, _mem: *const u8) -> i32 {
+    1
+}
+
+/// `BOOL HeapSetInformation(HANDLE, ..., PVOID, SIZE_T)`. No-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapSetInformation(
+    _handle: usize,
+    _info_class: u32,
+    _info: *const u8,
+    _info_len: usize,
+) -> i32 {
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

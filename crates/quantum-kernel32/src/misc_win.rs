@@ -488,6 +488,17 @@ pub extern "C" fn acmStreamUnprepareHeader(_stream: usize, _hdr: *mut c_void, _f
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn acmFormatSuggest(
+    _had: usize,
+    _fmt_in: *mut c_void,
+    _fmt_out: *mut c_void,
+    _fmt_out_size: u32,
+    _flags: u32,
+) -> u32 {
+    0
+}
+
 pub fn resolve_msacm32(function: &str) -> Option<u64> {
     let p: *const () = match function {
         "acmStreamOpen" => acmStreamOpen as *const (),
@@ -496,6 +507,7 @@ pub fn resolve_msacm32(function: &str) -> Option<u64> {
         "acmStreamConvert" => acmStreamConvert as *const (),
         "acmStreamPrepareHeader" => acmStreamPrepareHeader as *const (),
         "acmStreamUnprepareHeader" => acmStreamUnprepareHeader as *const (),
+        "acmFormatSuggest" => acmFormatSuggest as *const (),
         _ => return None,
     };
     Some(p as u64)
@@ -506,6 +518,37 @@ pub fn resolve_msacm32(function: &str) -> Option<u64> {
 // the standard BSD socket family — same names ws2_32 exports. Route
 // through ws2_32's resolver which already handles the same ordinals.
 
+/// wsock32.dll has its own 16-bit-era ordinal numbering that differs
+/// from ws2_32. Ordinals 100..120 in wsock32 are async helpers; we
+/// stub them with zero-success returns so DLL init doesn't unresolve
+/// them. Falls through to ws2_32 for BSD-socket-shaped imports.
+#[unsafe(no_mangle)]
+pub extern "C" fn wsock32_stub_zero() -> usize {
+    0
+}
+
 pub fn resolve_wsock32(function: &str) -> Option<u64> {
-    crate::ws2_32::resolve(function)
+    // Async/blocking-hook ordinals defined by the original Winsock 1.1
+    // wsock32.dll surface. We don't implement async resolution; the
+    // stubs return 0 so caller's "request" never fires.
+    let p: *const () = match function {
+        // #101 WSAAsyncSelect
+        // #102 WSAAsyncGetHostByName
+        // #103 WSAAsyncGetHostByAddr
+        // #104 WSACancelAsyncRequest
+        // #105 WSASetBlockingHook
+        // #106 WSAUnhookBlockingHook
+        // #107 WSAGetLastError (wsock32-specific ordinal)
+        // #108 WSASetLastError (wsock32-specific ordinal)
+        // #109 WSACancelBlockingCall
+        // #110 WSAIsBlocking
+        "#101" | "#102" | "#103" | "#104" | "#105" | "#106" | "#107" | "#108"
+        | "#109" | "#110" | "WSAAsyncSelect" | "WSAAsyncGetHostByName"
+        | "WSAAsyncGetHostByAddr" | "WSACancelAsyncRequest" | "WSASetBlockingHook"
+        | "WSAUnhookBlockingHook" | "WSACancelBlockingCall" | "WSAIsBlocking" => {
+            wsock32_stub_zero as *const ()
+        }
+        _ => return crate::ws2_32::resolve(function),
+    };
+    Some(p as u64)
 }

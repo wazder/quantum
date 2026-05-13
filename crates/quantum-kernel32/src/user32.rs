@@ -437,7 +437,80 @@ pub fn resolve(function: &str) -> Option<u64> {
         "MessageBoxW" => MessageBoxW as *const (),
         "GetProcessWindowStation" => GetProcessWindowStation as *const (),
         "GetUserObjectInformationW" => GetUserObjectInformationW as *const (),
+        "GetWindowLongPtrA" => GetWindowLongPtrA as *const (),
+        "GetWindowLongPtrW" => GetWindowLongPtrW as *const (),
+        "GetWindowLongA" => GetWindowLongA as *const (),
+        "SetWindowLongPtrA" => SetWindowLongPtrA as *const (),
+        "SetWindowLongPtrW" => SetWindowLongPtrW as *const (),
+        "GetTopWindow" => GetTopWindow as *const (),
+        "GetWindow" => GetWindow as *const (),
+        "GetWindowThreadProcessId" => GetWindowThreadProcessId as *const (),
+        "EnumDisplayDevicesA" => EnumDisplayDevicesA as *const (),
+        "EnumDisplayDevicesW" => EnumDisplayDevicesW as *const (),
         _ => return None,
     };
     Some(p as u64)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindowLongPtrA(_hwnd: usize, _index: i32) -> isize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindowLongPtrW(_hwnd: usize, _index: i32) -> isize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindowLongA(_hwnd: usize, _index: i32) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetWindowLongPtrA(_hwnd: usize, _index: i32, value: isize) -> isize {
+    value
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetWindowLongPtrW(_hwnd: usize, _index: i32, value: isize) -> isize {
+    value
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetTopWindow(_hwnd: usize) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindow(_hwnd: usize, _cmd: u32) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindowThreadProcessId(_hwnd: usize, pid_out: *mut u32) -> u32 {
+    if !pid_out.is_null() {
+        unsafe { *pid_out = 1 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn EnumDisplayDevicesA(
+    _device: *const i8,
+    _idx: u32,
+    _info: *mut core::ffi::c_void,
+    _flags: u32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn EnumDisplayDevicesW(
+    _device: *const u16,
+    _idx: u32,
+    _info: *mut core::ffi::c_void,
+    _flags: u32,
+) -> i32 {
+    0
 }

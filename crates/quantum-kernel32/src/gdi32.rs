@@ -102,7 +102,48 @@ pub fn resolve(function: &str) -> Option<u64> {
         "GetGlyphOutlineW" => GetGlyphOutlineW as *const (),
         "GetKerningPairsW" => GetKerningPairsW as *const (),
         "EnumFontFamiliesExW" => EnumFontFamiliesExW as *const (),
+        "DeleteDC" => DeleteDC as *const (),
+        "CreateDCW" => CreateDCW as *const (),
+        "CreateDCA" => CreateDCA as *const (),
+        "ExtEscape" => ExtEscape as *const (),
         _ => return None,
     };
     Some(p as u64)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DeleteDC(_dc: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateDCW(
+    _driver: *const u16,
+    _device: *const u16,
+    _output: *const u16,
+    _init_data: *const c_void,
+) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateDCA(
+    _driver: *const i8,
+    _device: *const i8,
+    _output: *const i8,
+    _init_data: *const c_void,
+) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ExtEscape(
+    _dc: usize,
+    _escape: i32,
+    _in_len: i32,
+    _in_buf: *const i8,
+    _out_len: i32,
+    _out_buf: *mut i8,
+) -> i32 {
+    0
 }

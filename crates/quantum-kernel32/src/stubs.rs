@@ -365,6 +365,22 @@ pub extern "C" fn GetStringTypeW(_info: u32, _src: *const u16, _n: i32, out: *mu
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn GetStringTypeA(
+    _lcid: u32,
+    _info: u32,
+    _src: *const u8,
+    _n: i32,
+    out: *mut u16,
+) -> i32 {
+    if !out.is_null() {
+        unsafe {
+            *out = 0;
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn GetTimeZoneInformation(_tz: *mut c_void) -> u32 {
     0
 }
@@ -1104,17 +1120,8 @@ pub extern "C" fn GlobalUnlock(_p: *mut u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn GlobalMemoryStatus(_info: *mut c_void) {}
 
-#[unsafe(no_mangle)]
-pub extern "C" fn HeapReAlloc(_h: usize, _flags: u32, _mem: *mut u8, new_size: usize) -> *mut u8 {
-    // Naive: just allocate fresh, content is lost. Real impl would
-    // copy from the existing block.
-    crate::heap::HeapAlloc(crate::heap::DEFAULT_HEAP_HANDLE, 0, new_size)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn HeapSize(_h: usize, _flags: u32, _mem: *const u8) -> usize {
-    0
-}
+// HeapReAlloc + HeapSize live in heap.rs now; the prior stubs are
+// removed.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn HeapQueryInformation(
@@ -1544,5 +1551,198 @@ pub extern "C" fn VerifyVersionInfoW(_info: *mut c_void, _type: u32, _mask: u64)
 
 #[unsafe(no_mangle)]
 pub extern "C" fn VirtualQuery(_addr: *const c_void, _info: *mut c_void, _len: usize) -> usize {
+    0
+}
+
+// ---- Locale / string mapping ----
+
+/// `int LCMapStringA(LCID, DWORD flags, LPCSTR src, int srclen, LPSTR dst, int dstlen)`.
+/// Most callers pass `LCMAP_UPPERCASE | LCMAP_LOWERCASE`; we provide a
+/// byte-for-byte ASCII implementation that handles those two flags.
+#[unsafe(no_mangle)]
+pub extern "C" fn LCMapStringA(
+    _lcid: u32,
+    flags: u32,
+    src: *const u8,
+    src_len: i32,
+    dst: *mut u8,
+    dst_len: i32,
+) -> i32 {
+    if src.is_null() || src_len == 0 {
+        return 0;
+    }
+    let src_count = if src_len < 0 {
+        // Null-terminated.
+        let mut n = 0;
+        loop {
+            let b = unsafe { *src.add(n) };
+            n += 1;
+            if b == 0 {
+                break;
+            }
+        }
+        n as i32
+    } else {
+        src_len
+    };
+    if dst.is_null() || dst_len <= 0 {
+        return src_count;
+    }
+    let upper = (flags & 0x0000_0200) != 0; // LCMAP_UPPERCASE
+    let lower = (flags & 0x0000_0100) != 0; // LCMAP_LOWERCASE
+    let n = src_count.min(dst_len) as usize;
+    for i in 0..n {
+        let b = unsafe { *src.add(i) };
+        let mapped = if upper && b.is_ascii_lowercase() {
+            b - 32
+        } else if lower && b.is_ascii_uppercase() {
+            b + 32
+        } else {
+            b
+        };
+        unsafe { *dst.add(i) = mapped };
+    }
+    n as i32
+}
+
+/// `BOOL GetStringTypeExA(...)` — LCMAP variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn GetStringTypeExA(
+    _lcid: u32,
+    info_type: u32,
+    src: *const u8,
+    src_len: i32,
+    char_type: *mut u16,
+) -> i32 {
+    GetStringTypeA(0, info_type, src, src_len, char_type)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetStringTypeExW(
+    _lcid: u32,
+    info_type: u32,
+    src: *const u16,
+    src_len: i32,
+    char_type: *mut u16,
+) -> i32 {
+    GetStringTypeW(info_type, src, src_len, char_type)
+}
+
+// ---- File system stubs ----
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FindFirstFileExA(
+    _name: *const i8,
+    _info_level: u32,
+    _data: *mut c_void,
+    _search_op: u32,
+    _filter: *mut c_void,
+    _flags: u32,
+) -> usize {
+    -1isize as usize
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FindNextFileA(_handle: usize, _data: *mut c_void) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFullPathNameA(
+    name: *const i8,
+    buffer_len: u32,
+    buffer: *mut i8,
+    _file_part: *mut *mut i8,
+) -> u32 {
+    if name.is_null() || buffer.is_null() {
+        return 0;
+    }
+    let mut n: usize = 0;
+    unsafe {
+        while *name.add(n) != 0 {
+            if (n as u32) < buffer_len {
+                *buffer.add(n) = *name.add(n);
+            }
+            n += 1;
+        }
+        if (n as u32) < buffer_len {
+            *buffer.add(n) = 0;
+        }
+    }
+    n as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetTempPathA(buffer_len: u32, buffer: *mut i8) -> u32 {
+    if buffer.is_null() {
+        return 5;
+    }
+    let s = b"/tmp/\0";
+    let n = s.len().min(buffer_len as usize);
+    for (i, b) in s.iter().enumerate().take(n) {
+        unsafe { *buffer.add(i) = *b as i8 };
+    }
+    (n - 1) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetDriveTypeA(_path: *const i8) -> u32 {
+    3 // DRIVE_FIXED
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindowsDirectoryA(buffer: *mut i8, buffer_len: u32) -> u32 {
+    if buffer.is_null() {
+        return 10;
+    }
+    let s = b"C:\\Windows\0";
+    let n = s.len().min(buffer_len as usize);
+    for (i, b) in s.iter().enumerate().take(n) {
+        unsafe { *buffer.add(i) = *b as i8 };
+    }
+    (n - 1) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetWindowsDirectoryW(buffer: *mut u16, buffer_len: u32) -> u32 {
+    if buffer.is_null() {
+        return 10;
+    }
+    let s: &[u16] = &[
+        b'C' as u16, b':' as u16, b'\\' as u16,
+        b'W' as u16, b'i' as u16, b'n' as u16,
+        b'd' as u16, b'o' as u16, b'w' as u16, b's' as u16, 0,
+    ];
+    let n = s.len().min(buffer_len as usize);
+    for (i, c) in s.iter().enumerate().take(n) {
+        unsafe { *buffer.add(i) = *c };
+    }
+    (n - 1) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DeviceIoControl(
+    _handle: usize,
+    _code: u32,
+    _in_buf: *const c_void,
+    _in_len: u32,
+    _out_buf: *mut c_void,
+    _out_len: u32,
+    bytes_returned: *mut u32,
+    _overlapped: *mut c_void,
+) -> i32 {
+    if !bytes_returned.is_null() {
+        unsafe { *bytes_returned = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn OpenEventA(_access: u32, _inherit: i32, _name: *const i8) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn OpenEventW(_access: u32, _inherit: i32, _name: *const u16) -> usize {
     0
 }
