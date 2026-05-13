@@ -203,12 +203,19 @@ fn load_side_dlls(
 /// (saved/restored by the trap helper) and the outer caller's trap
 /// state is untouched.
 fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, trace: bool) {
+    // Stash the entry RSP so each DLL init call starts on a clean
+    // stack. A previous TLS callback or DllMain that faulted mid-frame
+    // would otherwise leave RSP pointing at random memory and the next
+    // function's prologue would `mov [rsp+8], rbx` into nowhere.
+    let saved_rsp = ctx.gprs[4];
+
     if let Ok(Some(tls)) = quantum_loader::tls::parse(&sm.image) {
         for cb_rva in &tls.callbacks {
             let cb_va = sm.image.actual_base + *cb_rva as u64;
             if trace {
                 eprintln!("[trace] TLS cb @ {cb_va:#x} ({})", sm.name);
             }
+            ctx.gprs[4] = saved_rsp;
             ctx.gprs[1] = sm.image.actual_base; // RCX = hinstDLL
             ctx.gprs[2] = 1; // RDX = DLL_PROCESS_ATTACH
             ctx.gprs[8] = 0; // R8 = reserved
@@ -219,9 +226,11 @@ fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, 
                 && rc == 0xFFFF_FFFE
                 && let Some(crash) = take_crash_info()
             {
+                let last_rip = LAST_ENTERED_RIP.load(Ordering::SeqCst);
+                let rva = last_rip.saturating_sub(sm.image.actual_base);
                 eprintln!(
-                    "[trace] {} TLS cb faulted sig {} addr {:#x}",
-                    sm.name, crash.sig, crash.fault_addr
+                    "[trace] {} TLS cb faulted sig {} fault_addr={:#x} last_rip={:#x} (rva {:#x})",
+                    sm.name, crash.sig, crash.fault_addr, last_rip, rva
                 );
             }
         }
@@ -231,6 +240,7 @@ fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, 
         if trace {
             eprintln!("[trace] DllMain @ {entry_va:#x} ({})", sm.name);
         }
+        ctx.gprs[4] = saved_rsp;
         ctx.gprs[1] = sm.image.actual_base;
         ctx.gprs[2] = 1;
         ctx.gprs[8] = 0;
@@ -241,12 +251,17 @@ fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, 
             && rc == 0xFFFF_FFFE
             && let Some(crash) = take_crash_info()
         {
+            let last_rip = LAST_ENTERED_RIP.load(Ordering::SeqCst);
+            let rva = last_rip.saturating_sub(sm.image.actual_base);
             eprintln!(
-                "[trace] {} DllMain faulted sig {} addr {:#x}",
-                sm.name, crash.sig, crash.fault_addr
+                "[trace] {} DllMain faulted sig {} fault_addr={:#x} last_rip={:#x} (rva {:#x})",
+                sm.name, crash.sig, crash.fault_addr, last_rip, rva
             );
         }
     }
+
+    // Restore the caller's RSP so main-image entry isn't perturbed.
+    ctx.gprs[4] = saved_rsp;
 }
 
 /// `ThreadSpawner` implementation that drives the same dispatcher /
@@ -736,9 +751,19 @@ pub fn invoke_guest_function(
     ctx: &mut GuestContext,
     fn_rip: u64,
 ) -> Result<u64, RunError> {
-    // Push a fake return address so the callee's RET pops STOP_SENTINEL
-    // and exits the dispatcher cleanly.
-    ctx.gprs[4] = ctx.gprs[4].wrapping_sub(8);
+    // Win64 ABI: a CALL site reserves 0x20 bytes of "home" / shadow
+    // space ABOVE the return-address slot. The callee's prologue may
+    // immediately `mov [rsp+8..rsp+0x28]` to spill non-volatile regs
+    // there — without this space the very first instruction of MSVC-
+    // compiled DllMains faults.
+    //
+    // Layout we set up (stack grows down):
+    //   [rsp+0x20..rsp+0x28]  shadow slot 4
+    //   [rsp+0x18..rsp+0x20]  shadow slot 3
+    //   [rsp+0x10..rsp+0x18]  shadow slot 2
+    //   [rsp+ 0x8..rsp+0x10]  shadow slot 1
+    //   [rsp     ..rsp+ 0x8]  return address (STOP_SENTINEL)
+    ctx.gprs[4] = ctx.gprs[4].wrapping_sub(0x28);
     // SAFETY: ctx.gprs[4] points into the guest stack which is real
     // host memory we allocated via MachVmManager.
     unsafe {
