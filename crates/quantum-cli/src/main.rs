@@ -11,7 +11,9 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use quantum_loader::{ImportEntry, PeFile, PeKind, apply_relocations, imports as imp, load};
+use quantum_loader::{
+    ImportEntry, PeFile, PeKind, apply_relocations, exception as exc, imports as imp, load,
+};
 use quantum_runtime::MachVmManager;
 
 fn main() -> ExitCode {
@@ -35,6 +37,13 @@ fn main() -> ExitCode {
             Some(path) => cmd_imports(path),
             None => {
                 eprintln!("usage: quantum imports <path-to.exe>");
+                ExitCode::from(2)
+            }
+        },
+        Some("seh") => match args.get(2) {
+            Some(path) => cmd_seh(path),
+            None => {
+                eprintln!("usage: quantum seh <path-to.exe>");
                 ExitCode::from(2)
             }
         },
@@ -109,6 +118,111 @@ fn cmd_imports(path: &str) -> ExitCode {
     println!("---");
     println!("{} DLLs, {} total imports", table.dlls.len(), total);
     ExitCode::SUCCESS
+}
+
+fn cmd_seh(path: &str) -> ExitCode {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read {path}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let pe = match PeFile::parse(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("parse: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mem = MachVmManager::new();
+    let image = match load(&pe, &mem) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("load: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let funcs = match exc::parse(&image) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("parse exception dir: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    println!("{} RUNTIME_FUNCTION entries", funcs.len());
+    let mut with_handler = 0usize;
+    let mut with_chain = 0usize;
+    let mut errors = 0usize;
+    for f in &funcs {
+        match exc::parse_unwind_info(&image, f.unwind_info_rva) {
+            Ok(ui) => {
+                if ui.has_exception_handler() {
+                    with_handler += 1;
+                }
+                if ui.chained_function.is_some() {
+                    with_chain += 1;
+                }
+            }
+            Err(_) => errors += 1,
+        }
+    }
+    println!(
+        "  with EHANDLER/UHANDLER: {with_handler}\n  with CHAININFO:         {with_chain}\n  parse errors:           {errors}"
+    );
+
+    // Optional second arg: lookup RVA.
+    if let Some(rva_str) = args::nth(3) {
+        let rva = match parse_hex(&rva_str) {
+            Some(v) => v,
+            None => {
+                eprintln!("bad rva: {rva_str}");
+                return ExitCode::from(2);
+            }
+        };
+        match exc::lookup_runtime_function(&funcs, rva) {
+            Some(f) => {
+                println!(
+                    "  {:#x} -> RUNTIME_FUNCTION {{ begin={:#x} end={:#x} unwind_info={:#x} }}",
+                    rva, f.begin_rva, f.end_rva, f.unwind_info_rva,
+                );
+                match exc::resolve_handler(&image, f) {
+                    Ok((ui, src)) => {
+                        println!(
+                            "    flags={:#x} prolog={} codes={} frame_reg={} frame_off={}",
+                            ui.flags,
+                            ui.size_of_prolog,
+                            ui.count_of_codes,
+                            ui.frame_register,
+                            ui.frame_offset,
+                        );
+                        if let Some(h) = ui.handler_rva {
+                            println!(
+                                "    handler_rva = {:#x} (from RF starting at {:#x})",
+                                h, src.begin_rva
+                            );
+                        } else {
+                            println!("    no exception handler on terminal UNWIND_INFO");
+                        }
+                    }
+                    Err(e) => eprintln!("    resolve_handler failed: {e}"),
+                }
+            }
+            None => println!("  {:#x} -> no RUNTIME_FUNCTION", rva),
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+mod args {
+    pub fn nth(i: usize) -> Option<String> {
+        std::env::args().nth(i)
+    }
+}
+
+fn parse_hex(s: &str) -> Option<u32> {
+    let s = s.trim().trim_start_matches("0x");
+    u32::from_str_radix(s, 16).ok()
 }
 
 fn cmd_dump(path: &str) -> ExitCode {

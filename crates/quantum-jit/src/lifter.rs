@@ -667,10 +667,8 @@ impl<'a> Lifter<'a> {
         // ADCS Xd, Xn, Xm = 0xBA00_0000 | (Rm<<16) | (Rn<<5) | Rd
         // SBCS Xd, Xn, Xm = 0xFA00_0000 | (Rm<<16) | (Rn<<5) | Rd
         let base = if add { 0xBA00_0000 } else { 0xFA00_0000 };
-        let w = base
-            | ((Reg::X17.raw() as u32) << 16)
-            | ((rd.raw() as u32) << 5)
-            | (rd.raw() as u32);
+        let w =
+            base | ((Reg::X17.raw() as u32) << 16) | ((rd.raw() as u32) << 5) | (rd.raw() as u32);
         self.emitter.raw_word(w);
         if matches!(size, OpSize::B4) {
             self.emit_and_imm_lo32(rd, rd);

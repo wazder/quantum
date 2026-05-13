@@ -127,13 +127,7 @@ pub fn translate_for_dispatcher(
         let inst = decoder.next()?;
         let is_terminator = matches!(
             inst.op,
-            Op::Jmp
-                | Op::Jcc(_)
-                | Op::Ret
-                | Op::RetImm
-                | Op::Ud2
-                | Op::JmpIndirect
-                | Op::Call
+            Op::Jmp | Op::Jcc(_) | Op::Ret | Op::RetImm | Op::Ud2 | Op::JmpIndirect | Op::Call
         );
         insts.push(inst);
         if is_terminator || decoder.remaining() == 0 {

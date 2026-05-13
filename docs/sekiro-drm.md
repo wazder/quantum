@@ -56,6 +56,47 @@ co-routine yield: control enters Steam's runtime, returns to the
 guest with side effects already applied. Skipping just the
 instruction pointer leaves those side effects undone.
 
+## Update — .pdata lookup confirms the trap is *not* statically handled
+
+After parsing all 227,847 `RUNTIME_FUNCTION` entries from Sekiro's
+`.pdata`, neither the int3 RIP (`0x42a1e37`) nor the post-trap RIP
+(`0x42a1e3a`) nor the entry point itself (`0x429f310`) maps to any
+RUNTIME_FUNCTION. That means:
+
+- 55,348 of the 227,847 functions in Sekiro do install static SEH
+  exception handlers via `.pdata` UNWIND_INFO with EHANDLER/UHANDLER
+  flags — so the static SEH machinery is in heavy use *elsewhere* in
+  the binary.
+- The DRM stub itself is deliberately compiled *without* unwind info
+  so disassemblers and unwinders can't walk through it cleanly.
+- That rules out `.pdata`-based dispatch as the trap-recovery
+  mechanism: an exception at `0x42a1e37` would reach
+  `KiUserExceptionDispatcher`'s unhandled-handler stage on real
+  Windows.
+
+The most likely remaining mechanism is a **vectored exception
+handler**. Sekiro's import table doesn't reference
+`AddVectoredExceptionHandler`, but Steam's runtime (or the DRM stub
+itself) can register one via `ntdll!RtlAddVectoredExceptionHandler` or
+even by directly editing the relevant TEB / PEB linked list. The
+handler is what recognizes the trap pattern, patches `[rsp+0x640]`,
+advances `CONTEXT.Rip` past the trap, and returns
+`EXCEPTION_CONTINUE_EXECUTION`.
+
+That makes the unblock plan for Sekiro:
+
+1. Implement `Rtl/AddVectoredExceptionHandler` + the per-thread
+   vectored-handler list it backs.
+2. Wire our crash handler to: build EXCEPTION_RECORD + CONTEXT, walk
+   the vectored list, invoke each handler through the JIT.
+3. After each handler returns, check disposition; if
+   `EXCEPTION_CONTINUE_EXECUTION`, copy CONTEXT back into GuestContext
+   and resume from `CONTEXT.Rip`.
+
+Static `.pdata` SEH is still worth implementing — 24% of Sekiro's
+functions rely on it for other paths — but it won't unblock the DRM
+trap on its own.
+
 ## Paths forward
 
 1. **Full Windows SEH / SetUnhandledExceptionFilter emulation.**
