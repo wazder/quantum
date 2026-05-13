@@ -124,6 +124,23 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
                 crash.host_pc,
                 LAST_ENTERED_RIP.load(Ordering::SeqCst),
             );
+            let gprs = crash.to_guest_gprs();
+            eprintln!(
+                "[trace]   RAX={:#x} RCX={:#x} RDX={:#x} RBX={:#x}",
+                gprs[0], gprs[1], gprs[2], gprs[3]
+            );
+            eprintln!(
+                "[trace]   RSP={:#x} RBP={:#x} RSI={:#x} RDI={:#x}",
+                gprs[4], gprs[5], gprs[6], gprs[7]
+            );
+            eprintln!(
+                "[trace]   R8 ={:#x} R9 ={:#x} R10={:#x} R11={:#x}",
+                gprs[8], gprs[9], gprs[10], gprs[11]
+            );
+            eprintln!(
+                "[trace]   R12={:#x} R13={:#x} R14={:#x} R15={:#x}",
+                gprs[12], gprs[13], gprs[14], gprs[15]
+            );
         }
         eprintln!("[trace] exited; code={exit_code:#x}");
     }

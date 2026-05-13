@@ -118,11 +118,17 @@ static CRASH_INSTALLED: AtomicBool = AtomicBool::new(false);
 /// diagnostic without touching stdio from inside the handler.
 static CRASH_INFO: Mutex<Option<CrashInfo>> = Mutex::new(None);
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CrashInfo {
     pub sig: i32,
     pub fault_addr: u64,
     pub host_pc: u64,
+    /// AArch64 host GPRs X0..X30 + SP at the trap. Slots 0..15 carry
+    /// the guest GPRs (pinned RAX..R15 per the JIT's register map).
+    /// X19 is the pinned guest RSP. The SEH dispatcher uses these to
+    /// build the Win64 CONTEXT it hands to vectored / unhandled
+    /// exception filters.
+    pub host_gprs: [u64; 32],
 }
 
 #[repr(C)]
@@ -156,16 +162,24 @@ unsafe extern "C" {
     fn _exit(status: i32) -> !;
 }
 
-/// Pull the saved PC out of the ucontext passed to the signal handler.
-/// Layout follows Darwin arm64 `<mach/arm/_structs.h>`:
+/// Pull the saved PC + all 32 GPR-class regs out of the ucontext
+/// passed to the signal handler. Layout follows Darwin arm64
+/// `<mach/arm/_structs.h>`:
 ///   ucontext_t.uc_mcontext is a pointer to mcontext64
 ///   mcontext64 = { __es (16B), __ss (arm_thread_state64_t), __ns (...) }
-///   __ss.__pc is at offset 32 within __ss after __x[29] (29*8 = 232)
-///     + __fp (8) + __lr (8) + __sp (8), so __pc offset within __ss is 256.
+///   __ss layout:
+///     __x[0..28]  offset   0..232  (29 * 8 bytes)
+///     __fp (x29)  offset 232
+///     __lr (x30)  offset 240
+///     __sp        offset 248
+///     __pc        offset 256
 ///   __ss starts at offset 16 within mcontext64.
-unsafe fn pc_from_ucontext(ucontext: *mut core::ffi::c_void) -> u64 {
+///
+/// Returns `(pc, gprs)` where `gprs[0..29] = x0..x28`,
+/// `gprs[29] = fp`, `gprs[30] = lr`, `gprs[31] = sp`.
+unsafe fn regs_from_ucontext(ucontext: *mut core::ffi::c_void) -> (u64, [u64; 32]) {
     if ucontext.is_null() {
-        return 0;
+        return (0, [0; 32]);
     }
     // SAFETY: caller passes a valid Darwin ucontext_t pointer from
     // sigaction; layout is documented in <mach/arm/_structs.h>.
@@ -174,10 +188,19 @@ unsafe fn pc_from_ucontext(ucontext: *mut core::ffi::c_void) -> u64 {
         let mcontext_pp = (ucontext as *const u8).add(mcontext_ptr_off) as *const *mut u8;
         let mcontext = *mcontext_pp;
         if mcontext.is_null() {
-            return 0;
+            return (0, [0; 32]);
         }
-        let pc_ptr = mcontext.add(16 + 256) as *const u64;
-        *pc_ptr
+        let ss = mcontext.add(16);
+        let mut gprs = [0u64; 32];
+        // x0..x28: 29 registers at offset 0.
+        for (i, slot) in gprs.iter_mut().enumerate().take(29) {
+            *slot = *(ss.add(i * 8) as *const u64);
+        }
+        gprs[29] = *(ss.add(232) as *const u64); // fp
+        gprs[30] = *(ss.add(240) as *const u64); // lr
+        gprs[31] = *(ss.add(248) as *const u64); // sp
+        let pc = *(ss.add(256) as *const u64);
+        (pc, gprs)
     }
 }
 
@@ -187,11 +210,12 @@ extern "C" fn crash_handler(sig: i32, info: *mut DarwinSigInfo, ucontext: *mut c
     } else {
         unsafe { (*info).si_addr as u64 }
     };
-    let host_pc = unsafe { pc_from_ucontext(ucontext) };
+    let (host_pc, host_gprs) = unsafe { regs_from_ucontext(ucontext) };
     let crash = CrashInfo {
         sig,
         fault_addr,
         host_pc,
+        host_gprs,
     };
     if let Ok(mut g) = CRASH_INFO.lock() {
         *g = Some(crash);
@@ -229,6 +253,42 @@ fn install_crash_handler() {
 /// Cleared on read so subsequent calls return None until the next crash.
 pub fn take_crash_info() -> Option<CrashInfo> {
     CRASH_INFO.lock().ok().and_then(|mut g| g.take())
+}
+
+impl CrashInfo {
+    /// Map the captured AArch64 host GPRs to the 16 Win64 GPRs in
+    /// `GuestContext::gprs` ordering: [RAX, RCX, RDX, RBX, RSP, RBP,
+    /// RSI, RDI, R8..R15]. Pinning mirrors `quantum_jit::lifter::host_reg`:
+    ///   RAX..R15 ↔ X0..X15 (slot index = guest GP ordinal)
+    ///   except RSP ↔ X19 and RBP ↔ X5.
+    pub fn to_guest_gprs(&self) -> [u64; 16] {
+        let mut gprs = [0u64; 16];
+        gprs[..16].copy_from_slice(&self.host_gprs[..16]);
+        gprs[4] = self.host_gprs[19]; // RSP comes from X19
+        gprs
+    }
+}
+
+#[cfg(test)]
+mod crashinfo_tests {
+    use super::*;
+
+    #[test]
+    fn crash_info_maps_x19_to_rsp() {
+        let mut c = CrashInfo::default();
+        // Populate distinct values so the mapping is observable.
+        for i in 0..32 {
+            c.host_gprs[i] = 0xAA00 + i as u64;
+        }
+        let gprs = c.to_guest_gprs();
+        assert_eq!(gprs[0], 0xAA00); // RAX from X0
+        assert_eq!(gprs[1], 0xAA01); // RCX from X1
+        assert_eq!(gprs[3], 0xAA03); // RBX from X3
+        assert_eq!(gprs[4], 0xAA13); // RSP from X19
+        assert_eq!(gprs[5], 0xAA05); // RBP from X5
+        assert_eq!(gprs[8], 0xAA08); // R8 from X8
+        assert_eq!(gprs[15], 0xAA0F); // R15 from X15
+    }
 }
 
 #[cfg(test)]
