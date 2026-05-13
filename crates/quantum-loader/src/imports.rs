@@ -89,10 +89,10 @@ where
                     s
                 }
             };
-            let target = resolver(&dll.name, &lookup_name).ok_or_else(|| Error::Malformed {
-                what: "unresolved import",
-                at: entry.iat_slot_rva() as usize,
-            })?;
+            // Permissive: unresolved imports get NULL. The guest will
+            // crash if it actually calls the function, but init can
+            // still complete — useful while we're growing the surface.
+            let target = resolver(&dll.name, &lookup_name).unwrap_or(0);
             let slot = image
                 .rva_to_slice_mut(entry.iat_slot_rva(), 8)
                 .ok_or(Error::Malformed {

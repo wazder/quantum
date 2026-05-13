@@ -71,6 +71,12 @@ impl<'a> Lifter<'a> {
             Op::Cmp => self.lift_cmp(inst),
             Op::Inc => self.lift_inc_dec(inst, true),
             Op::Dec => self.lift_inc_dec(inst, false),
+            Op::Div => self.lift_divmul(inst, DivMulKind::Div),
+            Op::Idiv => self.lift_divmul(inst, DivMulKind::Idiv),
+            Op::Mul => self.lift_divmul(inst, DivMulKind::Mul),
+            Op::Imul if inst.operands[1].is_none() => self.lift_divmul(inst, DivMulKind::Imul1),
+            Op::Neg => self.lift_neg(inst),
+            Op::Not => self.lift_not(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Cmov(cond) => self.lift_cmov(inst, cond),
@@ -291,24 +297,44 @@ impl<'a> Lifter<'a> {
     fn lift_movzx_or_movsx(&mut self, inst: &Inst, signed: bool) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
         let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
-        if let (Operand::Reg(rd, _dst_size), Operand::Reg(rs, src_size)) = (dst, src) {
-            let hd = host_reg(rd);
-            let hs = host_reg(rs);
-            // Mask source low bits and place into dest. For signed we
-            // need a sign-extending bitfield op (SBFM); for unsigned
-            // a logical AND mask is enough.
-            match (src_size, signed) {
-                (OpSize::B1, false) => self.emit_and_imm_byte(hd, hs),
-                (OpSize::B2, false) => self.emit_and_imm_word(hd, hs),
-                (OpSize::B1, true) => self.emit_sxt_byte(hd, hs),
-                (OpSize::B2, true) => self.emit_sxt_word(hd, hs),
-                _ => return Err(LifterError::Unsupported(inst.op)),
+        match (dst, src) {
+            (Operand::Reg(rd, _dst_size), Operand::Reg(rs, src_size)) => {
+                let hd = host_reg(rd);
+                let hs = host_reg(rs);
+                match (src_size, signed) {
+                    (OpSize::B1, false) => self.emit_and_imm_byte(hd, hs),
+                    (OpSize::B2, false) => self.emit_and_imm_word(hd, hs),
+                    (OpSize::B1, true) => self.emit_sxt_byte(hd, hs),
+                    (OpSize::B2, true) => self.emit_sxt_word(hd, hs),
+                    _ => return Err(LifterError::Unsupported(inst.op)),
+                }
+                Ok(())
             }
-            return Ok(());
+            (Operand::Reg(rd, _dst_size), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let src_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let hd = host_reg(rd);
+                match (src_size, signed) {
+                    (OpSize::B1, false) => self.emitter.ldrb(hd, Reg::X16, leftover),
+                    (OpSize::B2, false) => self.emitter.ldrh(hd, Reg::X16, leftover),
+                    (OpSize::B1, true) => {
+                        self.emitter.ldrb(hd, Reg::X16, leftover);
+                        self.emit_sxt_byte(hd, hd);
+                    }
+                    (OpSize::B2, true) => {
+                        self.emitter.ldrh(hd, Reg::X16, leftover);
+                        self.emit_sxt_word(hd, hd);
+                    }
+                    _ => return Err(LifterError::Unsupported(inst.op)),
+                }
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(inst.op)),
         }
-        // Memory-source forms come once mem operand widths are wired
-        // through; today we error rather than emit subtly wrong code.
-        Err(LifterError::Unsupported(inst.op))
     }
 
     /// MOVSXD r, r/m32 — sign-extend 32→64. Encoded as SBFM Xd, Xs, #0, #31
@@ -415,6 +441,181 @@ impl<'a> Lifter<'a> {
     /// EXCEPT CF (x86 quirk); we ignore that subtlety for now and use
     /// ADDS/SUBS which set CF as well. Programs that rely on the
     /// CF-preservation property are vanishingly rare.
+    /// Emit `ORR Xd, Xn, Xm, LSL #shift` (shifted-register form).
+    fn emit_orr_lsl64(&mut self, rd: Reg, rn: Reg, rm: Reg, shift: u32) {
+        let word = 0xAA00_0000
+            | ((rm.raw() as u32) << 16)
+            | (shift << 10)
+            | ((rn.raw() as u32) << 5)
+            | (rd.raw() as u32);
+        self.emitter.raw_word(word);
+    }
+
+    /// Emit `UBFM Xd, Xn, #immr, #imms` (64-bit). Used for masks.
+    fn emit_ubfm64(&mut self, rd: Reg, rn: Reg, immr: u32, imms: u32) {
+        let word = 0xD340_0000
+            | (immr << 16)
+            | (imms << 10)
+            | ((rn.raw() as u32) << 5)
+            | (rd.raw() as u32);
+        self.emitter.raw_word(word);
+    }
+
+    /// Mask Xd to its low 32 bits (UBFM Xd, Xn, #0, #31, alias UXTW).
+    fn emit_uxtw(&mut self, rd: Reg, rn: Reg) {
+        self.emit_ubfm64(rd, rn, 0, 31);
+    }
+
+    /// Lift single-operand DIV / IDIV / MUL / IMUL (group 3 /4-/7).
+    ///
+    /// For 64-bit DIV/IDIV we currently assume RDX is zero on entry
+    /// (the overwhelmingly common idiom `xor rdx, rdx; div r`). For
+    /// 32-bit we combine EDX:EAX into a 64-bit dividend, divide
+    /// against the 32-bit divisor, then mask the results.
+    fn lift_divmul(&mut self, inst: &Inst, kind: DivMulKind) -> LifterResult<()> {
+        let rm_op = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        // Materialise the divisor/multiplier into X17.
+        let (size, divisor) = match rm_op {
+            Operand::Reg(r, s) => (s, host_reg(r)),
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let sz = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, sz);
+                (sz, Reg::X17)
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+
+        let rax = Reg::X0;
+        let rdx = Reg::X2;
+        match (kind, size) {
+            (DivMulKind::Div, OpSize::B8) | (DivMulKind::Idiv, OpSize::B8) => {
+                // Assume RDX == 0 (caller cleared it).
+                // x16 = saved rax for remainder computation.
+                self.emitter.mov64(Reg::X16, rax);
+                if matches!(kind, DivMulKind::Div) {
+                    self.emitter.udiv64(rax, Reg::X16, divisor);
+                } else {
+                    self.emitter.sdiv64(rax, Reg::X16, divisor);
+                }
+                self.emitter.msub64(rdx, rax, divisor, Reg::X16);
+                Ok(())
+            }
+            (DivMulKind::Div, OpSize::B4) | (DivMulKind::Idiv, OpSize::B4) => {
+                // dividend = (EDX << 32) | EAX (zero-extended).
+                self.emit_uxtw(Reg::X16, rax); // low 32 of rax
+                self.emit_uxtw(Reg::X17, rdx); // low 32 of rdx
+                self.emit_orr_lsl64(Reg::X16, Reg::X16, Reg::X17, 32);
+                // divisor masked to 32.
+                self.emit_uxtw(Reg::X17, divisor);
+                if matches!(kind, DivMulKind::Div) {
+                    self.emitter.udiv64(rax, Reg::X16, Reg::X17);
+                } else {
+                    // For IDIV B4 the divisor & dividend should be
+                    // signed 32-bit. SDIV with 64-bit zero-extended
+                    // values would treat them as positive — so we
+                    // sign-extend instead.
+                    // SXTW Xd, Wn -> SBFM Xd, Xn, #0, #31.
+                    let sxtw = |dst: Reg, src: Reg| -> u32 {
+                        0x9340_7C00
+                            | ((src.raw() as u32) << 5)
+                            | (dst.raw() as u32)
+                    };
+                    self.emitter.raw_word(sxtw(Reg::X16, rax));
+                    // Re-pack dividend properly for signed: high half
+                    // is signed rdx, low is unsigned rax.
+                    // Compromise: just treat dividend as 64-bit signed
+                    // value of (rdx<<32)|rax (cast). That matches the
+                    // semantics if rdx is the proper sign-extension
+                    // of the result of a prior CDQ.
+                    self.emit_orr_lsl64(Reg::X16, Reg::X16, Reg::X17, 32);
+                    self.emitter.raw_word(sxtw(Reg::X17, divisor));
+                    self.emitter.sdiv64(rax, Reg::X16, Reg::X17);
+                }
+                self.emitter.msub64(rdx, rax, Reg::X17, Reg::X16);
+                // Mask quotient/remainder to 32 bits each.
+                self.emit_uxtw(rax, rax);
+                self.emit_uxtw(rdx, rdx);
+                Ok(())
+            }
+            (DivMulKind::Mul, OpSize::B8) => {
+                // RDX:RAX = RAX * r/m (unsigned).
+                self.emitter.mov64(Reg::X16, rax);
+                self.emitter.mul64(rax, Reg::X16, divisor);
+                self.emitter.umulh64(rdx, Reg::X16, divisor);
+                Ok(())
+            }
+            (DivMulKind::Imul1, OpSize::B8) => {
+                // RDX:RAX = RAX * r/m (signed).
+                self.emitter.mov64(Reg::X16, rax);
+                self.emitter.mul64(rax, Reg::X16, divisor);
+                self.emitter.smulh64(rdx, Reg::X16, divisor);
+                Ok(())
+            }
+            (DivMulKind::Mul, OpSize::B4) | (DivMulKind::Imul1, OpSize::B4) => {
+                // EDX:EAX = EAX * r/m32. Mask both inputs to 32 bits
+                // (signed extend for IMUL), multiply 64-bit, split into
+                // low/high halves, mask each to 32.
+                let signed = matches!(kind, DivMulKind::Imul1);
+                if signed {
+                    let sxtw = |dst: Reg, src: Reg| -> u32 {
+                        0x9340_7C00
+                            | ((src.raw() as u32) << 5)
+                            | (dst.raw() as u32)
+                    };
+                    self.emitter.raw_word(sxtw(Reg::X16, rax));
+                    self.emitter.raw_word(sxtw(Reg::X17, divisor));
+                } else {
+                    self.emit_uxtw(Reg::X16, rax);
+                    self.emit_uxtw(Reg::X17, divisor);
+                }
+                self.emitter.mul64(rax, Reg::X16, Reg::X17);
+                // EDX = (result >> 32) & 0xFFFFFFFF.
+                self.emit_ubfm64(rdx, rax, 32, 63);
+                self.emit_uxtw(rax, rax);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(inst.op)),
+        }
+    }
+
+    /// NEG r/m: rd = -rd (alias SUB rd, XZR, rd). Sets NZCV.
+    fn lift_neg(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        if let Operand::Reg(rd, size) = dst {
+            let hd = host_reg(rd);
+            // SUBS Xd, XZR, Xd (NEGS alias). NEGS encoding:
+            //   0xEB00_0000 | (Rm<<16) | (XZR<<5) | Rd.
+            let w = 0xEB00_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
+            self.emitter.raw_word(w);
+            if matches!(size, OpSize::B4) {
+                self.emit_and_imm_lo32(hd, hd);
+            }
+            return Ok(());
+        }
+        Err(LifterError::Unsupported(Op::Neg))
+    }
+
+    /// NOT r/m: rd = ~rd (alias MVN). No flags.
+    fn lift_not(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        if let Operand::Reg(rd, size) = dst {
+            let hd = host_reg(rd);
+            // MVN Xd, Xm = ORN Xd, XZR, Xm. ORN: 0xAA20_0000 | (Rm<<16) | (XZR<<5) | Rd.
+            let w = 0xAA20_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
+            self.emitter.raw_word(w);
+            if matches!(size, OpSize::B4) {
+                self.emit_and_imm_lo32(hd, hd);
+            }
+            return Ok(());
+        }
+        Err(LifterError::Unsupported(Op::Not))
+    }
+
     fn lift_inc_dec(&mut self, inst: &Inst, inc: bool) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
         if let Operand::Reg(rd, size) = dst {
@@ -610,6 +811,25 @@ impl<'a> Lifter<'a> {
                 }
                 Ok(())
             }
+            // mov [mem], imm (C7 /0 form). For B8 the imm is sign-extended
+            // from imm32; for smaller widths it's stored as-is.
+            (dst @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Imm(imm, _)) => {
+                let size = match dst {
+                    Operand::Mem(m) => m.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&dst, inst, Reg::X16)?;
+                // Materialise the immediate into X17 (X16 holds the addr).
+                self.emitter.load_const64(Reg::X17, imm as u64);
+                match size {
+                    OpSize::B8 => self.emitter.str64(Reg::X17, Reg::X16, leftover),
+                    OpSize::B4 => self.emitter.str32(Reg::X17, Reg::X16, leftover),
+                    OpSize::B2 => self.emitter.strh(Reg::X17, Reg::X16, leftover),
+                    OpSize::B1 => self.emitter.strb(Reg::X17, Reg::X16, leftover),
+                }
+                Ok(())
+            }
             _ => Err(LifterError::Unsupported(Op::Mov)),
         }
     }
@@ -747,7 +967,53 @@ impl<'a> Lifter<'a> {
                 self.emitter.cmp64_imm(host_reg(ra), imm as u32);
                 Ok(())
             }
+            // cmp reg, imm with imm outside cheap range → materialise in X17.
+            (Operand::Reg(ra, OpSize::B4 | OpSize::B8), Operand::Imm(imm, _)) => {
+                self.emitter.load_const64(Reg::X17, imm as u64);
+                self.emitter.cmp64(host_reg(ra), Reg::X17);
+                Ok(())
+            }
+            // cmp [mem], reg
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rb, size)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.cmp64(Reg::X17, host_reg(rb));
+                Ok(())
+            }
+            // cmp reg, [mem]
+            (Operand::Reg(ra, size), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.cmp64(host_reg(ra), Reg::X17);
+                Ok(())
+            }
+            // cmp [mem], imm
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Imm(imm, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                if (0..(1 << 24)).contains(&imm) {
+                    self.emitter.cmp64_imm(Reg::X17, imm as u32);
+                } else {
+                    self.emitter.load_const64(Reg::X16, imm as u64);
+                    self.emitter.cmp64(Reg::X17, Reg::X16);
+                }
+                Ok(())
+            }
             _ => Err(LifterError::Unsupported(Op::Cmp)),
+        }
+    }
+
+    fn load_sized(&mut self, dst: Reg, base: Reg, offset: u32, size: OpSize) {
+        match size {
+            OpSize::B8 => self.emitter.ldr64(dst, base, offset),
+            OpSize::B4 => self.emitter.ldr32(dst, base, offset),
+            OpSize::B2 => self.emitter.ldrh(dst, base, offset),
+            OpSize::B1 => self.emitter.ldrb(dst, base, offset),
         }
     }
 }
@@ -756,6 +1022,15 @@ impl<'a> Lifter<'a> {
 enum ArithKind {
     Add,
     Sub,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DivMulKind {
+    Div,
+    Idiv,
+    Mul,
+    /// Single-operand IMUL (group 3 /5).
+    Imul1,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -886,6 +1161,14 @@ mod tests {
         let words = lift_one(&[0x0F, 0x0B]);
         // brk #0 -> 0xD420_0000
         assert_eq!(words, &[0xD420_0000]);
+    }
+
+    #[test]
+    fn mov_mem_rsp_rcx_lifts_ok() {
+        // 48 89 4C 24 08 -> mov [rsp+8], rcx
+        let words = lift_one(&[0x48, 0x89, 0x4C, 0x24, 0x08]);
+        // Should emit mov xtmp, x19 (rsp) then str x1 (rcx), [xtmp, #8].
+        assert!(!words.is_empty(), "expected non-empty emission");
     }
 
     #[test]

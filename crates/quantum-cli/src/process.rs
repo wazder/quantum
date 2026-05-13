@@ -51,28 +51,70 @@ impl std::error::Error for RunError {}
 /// guest passed to `ExitProcess`, or `u32::MAX` if the guest returned
 /// without calling it.
 pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
+    let trace = std::env::var("QUANTUM_TRACE").is_ok();
+    if trace {
+        eprintln!("[trace] parsing PE ({} bytes)", bytes.len());
+    }
     let pe = PeFile::parse(bytes).map_err(RunError::Parse)?;
+    if trace {
+        eprintln!(
+            "[trace] PE: entry={:#x} base={:#x} sections={}",
+            pe.opt.address_of_entry_point,
+            pe.opt.image_base,
+            pe.coff.number_of_sections,
+        );
+    }
     let mem = MachVmManager::new();
     let mut image = load(&pe, &mem).map_err(RunError::Load)?;
+    if trace {
+        eprintln!(
+            "[trace] mapped at {:#x} (size {:#x})",
+            image.actual_base,
+            image.size_of_image,
+        );
+    }
     apply_relocations(&mut image).map_err(RunError::Reloc)?;
     let imp = imports::parse(&image).map_err(RunError::Imports)?;
+    if trace {
+        let mut unresolved = 0;
+        for dll in &imp.dlls {
+            for entry in &dll.entries {
+                let n = match entry {
+                    quantum_loader::ImportEntry::Name { name, .. } => name.clone(),
+                    quantum_loader::ImportEntry::Ordinal { ordinal, .. } => format!("#{ordinal}"),
+                };
+                if resolve(&dll.name, &n).is_none() {
+                    unresolved += 1;
+                }
+            }
+        }
+        eprintln!(
+            "[trace] imports: {} DLLs, {} unresolved",
+            imp.dlls.len(),
+            unresolved,
+        );
+    }
     imports::wire_iat(&mut image, &imp, resolve).map_err(RunError::WireIat)?;
 
     let stack = GuestStack::default_size().map_err(RunError::Stack)?;
     let mut ctx = GuestContext::default();
-    // Win64 entry contract: RSP is 8-byte misaligned at the moment
-    // the entry receives control, with the return address sitting one
-    // slot above. We seed STOP_SENTINEL as that fake return so a
-    // clean entry-point RET exits the dispatcher cleanly.
     ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
 
     let mut disp = Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?;
     let entry_va = image.actual_base + image.entry_rva as u64;
+    if trace {
+        eprintln!("[trace] entering JIT at {entry_va:#x}");
+    }
 
     let exit_code = run_with_exit_trap(|| {
-        let _ = run_dispatcher_loop(&mut disp, &image, &mut ctx, entry_va);
+        if let Err(e) = run_dispatcher_loop(&mut disp, &image, &mut ctx, entry_va) {
+            eprintln!("[trace] dispatcher: {e}");
+        }
     });
 
+    if trace {
+        eprintln!("[trace] exited; code={exit_code:#x}");
+    }
     Ok(exit_code)
 }
 
@@ -82,13 +124,11 @@ fn run_dispatcher_loop(
     ctx: &mut GuestContext,
     start_rip: u64,
 ) -> Result<(), RunError> {
+    let trace = std::env::var("QUANTUM_TRACE_BLOCKS").is_ok();
     let mut current_rip = start_rip;
     let mut iters = 0;
     loop {
         iters += 1;
-        // 10M iterations is an upper bound for tonight; real game loops can
-        // easily exceed that — replace with chained blocks (Phase 1.4) to
-        // avoid the round-trip per block.
         if iters > 10_000_000 {
             return Err(RunError::Translate("dispatcher loop limit reached".into()));
         }
@@ -104,14 +144,20 @@ fn run_dispatcher_loop(
                     )));
                 }
             };
-            // 64 bytes is enough for any single basic block; the
-            // translator walks until the first terminator.
+            // Grow the decode window — Sekiro's DRM has long basic blocks.
+            let window = 256usize;
             let bytes: Vec<u8> = image
-                .rva_to_slice(rva, 64)
+                .rva_to_slice(rva, window.min(image.len() - rva as usize))
                 .ok_or_else(|| RunError::Translate(format!("RVA {rva:#x} oob")))?
                 .to_vec();
+            if trace {
+                eprintln!(
+                    "[block] translating @ {current_rip:#x} (rva {rva:#x}, first bytes: {:02x?})",
+                    &bytes[..8.min(bytes.len())]
+                );
+            }
             let block = block::translate_for_dispatcher(&bytes, current_rip, None)
-                .map_err(|e| RunError::Translate(format!("{e:?}")))?;
+                .map_err(|e| RunError::Translate(format!("at {current_rip:#x}: {e:?}")))?;
             disp.install(current_rip, &block.host_bytes)
                 .map_err(RunError::Dispatcher)?
         };

@@ -22,6 +22,14 @@ use crate::lifter::{Lifter, LifterError, cond_x86_to_a64};
 pub enum BlockError {
     Decode(crate::decoder::Error),
     Lift(LifterError),
+    /// Lift with location info: which guest RIP, and the offending op's
+    /// raw bytes (first 16 of the instruction).
+    LiftAt {
+        rip: u64,
+        op: Op,
+        bytes: alloc::vec::Vec<u8>,
+        err: LifterError,
+    },
     /// A Jcc/JMP rel target falls outside the decoded range.
     TargetOutOfBlock {
         branch_rip: u64,
@@ -55,6 +63,35 @@ impl From<FinishError> for BlockError {
 pub struct Block {
     pub host_bytes: Vec<u8>,
     pub guest_len: usize,
+}
+
+/// Detect a Steam-DRM `int3; jmp -3` anti-debug trap at the start of
+/// the decoded instruction stream and return the RIP that "the
+/// debugger" would resume at (i.e., immediately past the trap pair).
+fn detect_drm_int3_trap(insts: &[Inst]) -> Option<u64> {
+    if insts.len() < 2 {
+        return None;
+    }
+    let int3 = &insts[0];
+    let jmp = &insts[1];
+    if !matches!(int3.op, Op::Int3) {
+        return None;
+    }
+    if !matches!(jmp.op, Op::Jmp) {
+        return None;
+    }
+    let rel = match jmp.operands[0]? {
+        Operand::Imm(rel, _) => rel,
+        _ => return None,
+    };
+    let jmp_end = jmp.guest_rip.wrapping_add(jmp.len as u64);
+    let target = jmp_end.wrapping_add(rel as u64);
+    if target == int3.guest_rip {
+        // Standard pattern: jump-back to the int3 itself. Skip past both.
+        Some(jmp_end)
+    } else {
+        None
+    }
 }
 
 /// Sentinel value the dispatcher recognises as "guest hit UD2 / stop".
@@ -101,6 +138,26 @@ pub fn translate_for_dispatcher(
 
     let mut emitter = Emitter::new();
 
+    // Peephole: Steam DRM anti-debug trap `int3; jmp -3`. On Windows a
+    // registered exception handler skips past both instructions; without
+    // it the int3 BRK aborts the host. Detect the pattern and treat the
+    // block as a no-op that resumes execution past the trap.
+    if let Some(skip_to) = detect_drm_int3_trap(&insts) {
+        emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
+        emitter.stp64_pre(Reg::x(19), Reg::x(28), Reg::SP, -16);
+        emitter.stp64_pre(Reg::x(24), Reg::x(25), Reg::SP, -16);
+        emitter.mov64(Reg::x(28), Reg::X0);
+        emit_ctx_to_regs(&mut emitter);
+        emitter.ldr64(Reg::x(24), Reg::x(28), 144);
+        emitter.ldr64(Reg::x(25), Reg::x(28), 152);
+        emit_epilogue_const_rip(&mut emitter, skip_to);
+        emitter.finish()?;
+        return Ok(Block {
+            host_bytes: emitter.bytes(),
+            guest_len,
+        });
+    }
+
     // ---- Dispatcher prologue ----
     // Save host callee-saved regs we touch:
     //   X19 (guest RSP), X24 (gs_base), X25 (fs_base), X28 (ctx ptr),
@@ -121,7 +178,19 @@ pub fn translate_for_dispatcher(
     // ---- Body ----
     let last = insts.len() - 1;
     for inst in &insts[..last] {
-        Lifter::new(&mut emitter).lift(inst)?;
+        if let Err(e) = Lifter::new(&mut emitter).lift(inst) {
+            let inst_off = inst.guest_rip.wrapping_sub(start_rip) as usize;
+            let raw = bytes
+                .get(inst_off..inst_off + inst.len as usize)
+                .unwrap_or(&[])
+                .to_vec();
+            return Err(BlockError::LiftAt {
+                rip: inst.guest_rip,
+                op: inst.op,
+                bytes: raw,
+                err: e,
+            });
+        }
     }
 
     // ---- Terminator ----

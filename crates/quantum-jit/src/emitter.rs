@@ -506,6 +506,38 @@ impl Emitter {
     pub fn mul64(&mut self, rd: Reg, rn: Reg, rm: Reg) {
         self.madd64(rd, rn, rm, Reg::XZR);
     }
+
+    /// MSUB Rd, Rn, Rm, Ra — Rd = Ra - Rn*Rm.
+    pub fn msub64(&mut self, rd: Reg, rn: Reg, rm: Reg, ra: Reg) {
+        let w = (1 << 31)
+            | (0b00 << 29)
+            | (0b11011 << 24)
+            | (0b000 << 21)
+            | ((rm.0 as u32) << 16)
+            | (1 << 15)
+            | ((ra.0 as u32) << 10)
+            | ((rn.0 as u32) << 5)
+            | (rd.0 as u32);
+        self.push(w);
+    }
+
+    /// UMULH Rd, Rn, Rm — high 64 bits of unsigned 64x64.
+    pub fn umulh64(&mut self, rd: Reg, rn: Reg, rm: Reg) {
+        let w = 0x9BC0_7C00
+            | ((rm.0 as u32) << 16)
+            | ((rn.0 as u32) << 5)
+            | (rd.0 as u32);
+        self.push(w);
+    }
+
+    /// SMULH Rd, Rn, Rm — high 64 bits of signed 64x64.
+    pub fn smulh64(&mut self, rd: Reg, rn: Reg, rm: Reg) {
+        let w = 0x9B40_7C00
+            | ((rm.0 as u32) << 16)
+            | ((rn.0 as u32) << 5)
+            | (rd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Conditional select / set ===============
