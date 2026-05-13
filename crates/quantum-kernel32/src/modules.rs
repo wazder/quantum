@@ -147,7 +147,7 @@ static MODULES: &[ModuleEntry] = &[
     ModuleEntry {
         name: "steam_api64.dll",
         handle: HANDLE_STEAM_API64,
-        resolve: stub_resolve,
+        resolve: crate::steam::resolve,
     },
     ModuleEntry {
         name: "ntdll.dll",

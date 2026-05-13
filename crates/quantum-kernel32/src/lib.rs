@@ -6,11 +6,15 @@
 //! `ProcessExit` panic raised from `ExitProcess` can propagate cleanly
 //! through the JIT call boundary back to the runner.
 
+pub mod handles;
 pub mod heap;
 pub mod io;
 pub mod modules;
 pub mod process;
+pub mod steam;
+pub mod stubs;
 pub mod sync;
+pub mod threads;
 pub mod thunks;
 pub mod time;
 pub mod vm;
