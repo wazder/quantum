@@ -251,3 +251,146 @@ pub fn resolve_dinput8(function: &str) -> Option<u64> {
         _ => None,
     }
 }
+
+// ---------- Ordinal-only DLLs ----------
+//
+// Some DLLs Sekiro pulls export functions only by ordinal: WLDAP32,
+// OLEAUT32, XINPUT1_3. The loader's resolver receives `"#NNN"` for
+// these, so we match the same way.
+
+/// `BSTR SysAllocString(const OLECHAR *psz)` — OLEAUT32 ord 2.
+/// Allocate a length-prefixed UTF-16 string. We use HeapAlloc.
+#[unsafe(no_mangle)]
+pub extern "C" fn SysAllocString(psz: *const u16) -> *mut u16 {
+    if psz.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Walk to find length.
+    let mut len: usize = 0;
+    unsafe {
+        while *psz.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let byte_len = len * 2;
+    // BSTR layout: u32 byte_len, then UTF-16 chars, then NUL.
+    let total = 4 + byte_len + 2;
+    let raw = crate::heap::HeapAlloc(crate::heap::GetProcessHeap(), 0, total);
+    if raw.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe {
+        *(raw as *mut u32) = byte_len as u32;
+        let chars = raw.add(4) as *mut u16;
+        core::ptr::copy_nonoverlapping(psz, chars, len);
+        *chars.add(len) = 0;
+        chars
+    }
+}
+
+/// `void SysFreeString(BSTR)` — OLEAUT32 ord 6.
+#[unsafe(no_mangle)]
+pub extern "C" fn SysFreeString(bstr: *mut u16) {
+    if bstr.is_null() {
+        return;
+    }
+    // The allocation started 4 bytes before the char pointer.
+    let raw = unsafe { (bstr as *mut u8).sub(4) };
+    crate::heap::HeapFree(crate::heap::GetProcessHeap(), 0, raw);
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct XInputState {
+    packet_number: u32,
+    gamepad: XInputGamepad,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct XInputGamepad {
+    buttons: u16,
+    left_trigger: u8,
+    right_trigger: u8,
+    thumb_lx: i16,
+    thumb_ly: i16,
+    thumb_rx: i16,
+    thumb_ry: i16,
+}
+
+/// `DWORD XInputGetState(DWORD dwUserIndex, XINPUT_STATE *pState)` — ord 3.
+/// No controller wired today; return ERROR_DEVICE_NOT_CONNECTED so the
+/// game falls back to keyboard input.
+#[unsafe(no_mangle)]
+pub extern "C" fn XInputGetState(_user_index: u32, state: *mut XInputState) -> u32 {
+    if !state.is_null() {
+        unsafe {
+            core::ptr::write_bytes(state, 0, 1);
+        }
+    }
+    // ERROR_DEVICE_NOT_CONNECTED = 0x48F (1167).
+    1167
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct XInputCapabilities {
+    typ: u8,
+    sub_type: u8,
+    flags: u16,
+    gamepad: XInputGamepad,
+    vibration: [u16; 2],
+}
+
+/// `DWORD XInputGetCapabilities(DWORD dwUserIndex, DWORD dwFlags, XINPUT_CAPABILITIES *pCaps)` — ord 2.
+#[unsafe(no_mangle)]
+pub extern "C" fn XInputGetCapabilities(
+    _user_index: u32,
+    _flags: u32,
+    caps: *mut XInputCapabilities,
+) -> u32 {
+    if !caps.is_null() {
+        unsafe {
+            core::ptr::write_bytes(caps, 0, 1);
+        }
+    }
+    1167
+}
+
+/// Generic "this ordinal isn't implemented yet" thunk. WLDAP32's
+/// ordinals (#26, #27, etc.) point here so IAT wiring succeeds; if the
+/// guest actually invokes one we return 0 (most LDAP error codes are
+/// positive integers but 0 happens to be LDAP_SUCCESS, so callers
+/// proceed; later sites that depend on real results will error
+/// gracefully somewhere downstream).
+#[unsafe(no_mangle)]
+pub extern "C" fn ordinal_stub_zero() -> u64 {
+    0
+}
+
+pub fn resolve_oleaut32(function: &str) -> Option<u64> {
+    match function {
+        "#2" => Some(SysAllocString as *const () as u64),
+        "#6" => Some(SysFreeString as *const () as u64),
+        _ => None,
+    }
+}
+
+pub fn resolve_xinput1_3(function: &str) -> Option<u64> {
+    match function {
+        "#2" => Some(XInputGetCapabilities as *const () as u64),
+        "#3" => Some(XInputGetState as *const () as u64),
+        _ => None,
+    }
+}
+
+/// WLDAP32 ordinal -> generic noop. All 16 Sekiro ordinal imports here
+/// route to a single zero-returning thunk. A real LDAP client comes if
+/// the game ever actually exercises this path.
+pub fn resolve_wldap32(function: &str) -> Option<u64> {
+    if function.starts_with('#') {
+        Some(ordinal_stub_zero as *const () as u64)
+    } else {
+        None
+    }
+}

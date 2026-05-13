@@ -53,6 +53,15 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("dinput8.dll") {
         return crate::misc_win::resolve_dinput8(function);
     }
+    if dll.eq_ignore_ascii_case("oleaut32.dll") {
+        return crate::misc_win::resolve_oleaut32(function);
+    }
+    if dll.eq_ignore_ascii_case("xinput1_3.dll") {
+        return crate::misc_win::resolve_xinput1_3(function);
+    }
+    if dll.eq_ignore_ascii_case("wldap32.dll") {
+        return crate::misc_win::resolve_wldap32(function);
+    }
     None
 }
 
