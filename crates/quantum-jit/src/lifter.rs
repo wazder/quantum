@@ -79,6 +79,9 @@ impl<'a> Lifter<'a> {
             Op::Not => self.lift_not(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
+            Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
+            Op::Rol => self.lift_rotate(inst, true),
+            Op::Ror => self.lift_rotate(inst, false),
             Op::Cmov(cond) => self.lift_cmov(inst, cond),
             Op::Set(cond) => self.lift_set(inst, cond),
             Op::Push => self.lift_push(inst),
@@ -390,31 +393,64 @@ impl<'a> Lifter<'a> {
             (Operand::Reg(rd, size), Operand::Reg(rs, _)) => {
                 let hd = host_reg(rd);
                 let hs = host_reg(rs);
-                match op {
-                    BitOp::And => self.emitter.and64(hd, hd, hs),
-                    BitOp::Or => self.emitter.orr64(hd, hd, hs),
-                }
-                if matches!(size, OpSize::B4) {
-                    self.emit_and_imm_lo32(hd, hd);
-                }
+                self.emit_bitop_rr(op, hd, hd, hs, size);
                 Ok(())
             }
-            // Reg + imm bit-ops need a logical-immediate encoder we
-            // haven't added yet. Fall back to materialising the imm
-            // through X16 + register form.
             (Operand::Reg(rd, size), Operand::Imm(imm, _)) => {
                 let hd = host_reg(rd);
                 self.emitter.load_const64(Reg::X16, imm as u64);
-                match op {
-                    BitOp::And => self.emitter.and64(hd, hd, Reg::X16),
-                    BitOp::Or => self.emitter.orr64(hd, hd, Reg::X16),
-                }
-                if matches!(size, OpSize::B4) {
-                    self.emit_and_imm_lo32(hd, hd);
-                }
+                self.emit_bitop_rr(op, hd, hd, Reg::X16, size);
+                Ok(())
+            }
+            (Operand::Reg(rd, size), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+                let hd = host_reg(rd);
+                self.emit_bitop_rr(op, hd, hd, Reg::X17, size);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rs, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emit_bitop_rr(op, Reg::X17, Reg::X17, host_reg(rs), size);
+                self.store_sized(Reg::X17, Reg::X16, leftover, size);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Imm(imm, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.load_const64(Reg::X16, imm as u64);
+                self.emit_bitop_rr(op, Reg::X17, Reg::X17, Reg::X16, size);
+                let leftover2 = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.store_sized(Reg::X17, Reg::X16, leftover2, size);
                 Ok(())
             }
             _ => Err(LifterError::Unsupported(inst.op)),
+        }
+    }
+
+    fn emit_bitop_rr(&mut self, op: BitOp, rd: Reg, ra: Reg, rb: Reg, size: OpSize) {
+        match op {
+            BitOp::And => self.emitter.and64(rd, ra, rb),
+            BitOp::Or => self.emitter.orr64(rd, ra, rb),
+        }
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(rd, rd);
         }
     }
 
@@ -431,6 +467,40 @@ impl<'a> Lifter<'a> {
             (Operand::Reg(ra, _), Operand::Imm(imm, _)) => {
                 self.emitter.load_const64(Reg::X16, imm as u64);
                 self.emitter.ands64(Reg::XZR, host_reg(ra), Reg::X16);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rb, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.ands64(Reg::XZR, Reg::X17, host_reg(rb));
+                Ok(())
+            }
+            (Operand::Reg(ra, _), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.ands64(Reg::XZR, host_reg(ra), Reg::X17);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Imm(imm, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.load_const64(Reg::X16, imm as u64);
+                self.emitter.ands64(Reg::XZR, Reg::X17, Reg::X16);
                 Ok(())
             }
             _ => Err(LifterError::Unsupported(Op::Test)),
@@ -586,51 +656,105 @@ impl<'a> Lifter<'a> {
     /// NEG r/m: rd = -rd (alias SUB rd, XZR, rd). Sets NZCV.
     fn lift_neg(&mut self, inst: &Inst) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
-        if let Operand::Reg(rd, size) = dst {
-            let hd = host_reg(rd);
-            // SUBS Xd, XZR, Xd (NEGS alias). NEGS encoding:
-            //   0xEB00_0000 | (Rm<<16) | (XZR<<5) | Rd.
-            let w = 0xEB00_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
-            self.emitter.raw_word(w);
-            if matches!(size, OpSize::B4) {
-                self.emit_and_imm_lo32(hd, hd);
+        match dst {
+            Operand::Reg(rd, size) => {
+                let hd = host_reg(rd);
+                let w = 0xEB00_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
+                self.emitter.raw_word(w);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(hd, hd);
+                }
+                Ok(())
             }
-            return Ok(());
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                let w = 0xEB00_0000 | (17u32 << 16) | (31u32 << 5) | 17u32;
+                self.emitter.raw_word(w);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(Reg::X17, Reg::X17);
+                }
+                self.store_sized(Reg::X17, Reg::X16, leftover, size);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::Neg)),
         }
-        Err(LifterError::Unsupported(Op::Neg))
     }
 
     /// NOT r/m: rd = ~rd (alias MVN). No flags.
     fn lift_not(&mut self, inst: &Inst) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
-        if let Operand::Reg(rd, size) = dst {
-            let hd = host_reg(rd);
-            // MVN Xd, Xm = ORN Xd, XZR, Xm. ORN: 0xAA20_0000 | (Rm<<16) | (XZR<<5) | Rd.
-            let w = 0xAA20_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
-            self.emitter.raw_word(w);
-            if matches!(size, OpSize::B4) {
-                self.emit_and_imm_lo32(hd, hd);
+        match dst {
+            Operand::Reg(rd, size) => {
+                let hd = host_reg(rd);
+                let w = 0xAA20_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
+                self.emitter.raw_word(w);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(hd, hd);
+                }
+                Ok(())
             }
-            return Ok(());
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                let w = 0xAA20_0000 | (17u32 << 16) | (31u32 << 5) | 17u32;
+                self.emitter.raw_word(w);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(Reg::X17, Reg::X17);
+                }
+                self.store_sized(Reg::X17, Reg::X16, leftover, size);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::Not)),
         }
-        Err(LifterError::Unsupported(Op::Not))
     }
 
     fn lift_inc_dec(&mut self, inst: &Inst, inc: bool) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
-        if let Operand::Reg(rd, size) = dst {
-            let hd = host_reg(rd);
-            if inc {
-                self.emitter.adds64_imm(hd, hd, 1);
-            } else {
-                self.emitter.subs64_imm(hd, hd, 1);
+        match dst {
+            Operand::Reg(rd, size) => {
+                let hd = host_reg(rd);
+                if inc {
+                    self.emitter.adds64_imm(hd, hd, 1);
+                } else {
+                    self.emitter.subs64_imm(hd, hd, 1);
+                }
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(hd, hd);
+                }
+                Ok(())
             }
-            if matches!(size, OpSize::B4) {
-                self.emit_and_imm_lo32(hd, hd);
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                if inc {
+                    self.emitter.adds64_imm(Reg::X17, Reg::X17, 1);
+                } else {
+                    self.emitter.subs64_imm(Reg::X17, Reg::X17, 1);
+                }
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(Reg::X17, Reg::X17);
+                }
+                self.store_sized(Reg::X17, Reg::X16, leftover, size);
+                Ok(())
             }
-            return Ok(());
+            _ => Err(LifterError::Unsupported(inst.op)),
         }
-        Err(LifterError::Unsupported(inst.op))
     }
 
     /// SHL/SHR r, imm8 or r, CL. We use AArch64's variable-shift
@@ -653,8 +777,6 @@ impl<'a> Lifter<'a> {
 
         let amt_reg = match amt {
             Operand::Imm(imm, _) => {
-                // x86 masks the count to 5 bits (32-bit dst) or 6 bits
-                // (64-bit dst). We do the same here.
                 let mask = if matches!(size, OpSize::B8) {
                     0x3F
                 } else {
@@ -668,10 +790,67 @@ impl<'a> Lifter<'a> {
             _ => return Err(LifterError::Unsupported(inst.op)),
         };
 
+        // For SAR on B4 we need to sign-extend the 32-bit value first so
+        // ASRV uses bit 31 as the sign rather than bit 63 (which is zero
+        // after our usual upper-clear mask).
+        if matches!(dir, ShiftDir::ArithRight) && matches!(size, OpSize::B4) {
+            // SBFM Xd, Xs, #0, #31 (alias SXTW) — sign-extend 32→64.
+            let sxtw = 0x9340_7C00 | ((hd.raw() as u32) << 5) | (hd.raw() as u32);
+            self.emitter.raw_word(sxtw);
+        }
+
         match dir {
             ShiftDir::Left => self.emitter.lslv64(hd, hd, amt_reg),
             ShiftDir::Right => self.emitter.lsrv64(hd, hd, amt_reg),
+            ShiftDir::ArithRight => self.emitter.asrv64(hd, hd, amt_reg),
         }
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(hd, hd);
+        }
+        Ok(())
+    }
+
+    /// ROL / ROR r, imm or r, CL.
+    fn lift_rotate(&mut self, inst: &Inst, rol: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let amt = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (rd, size) = match dst {
+            Operand::Reg(r, s) => (r, s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let hd = host_reg(rd);
+
+        // AArch64 only has ROR; emulate ROL n as ROR (width - n).
+        let amt_reg = match amt {
+            Operand::Imm(imm, _) => {
+                let mask = if matches!(size, OpSize::B8) {
+                    0x3F
+                } else {
+                    0x1F
+                };
+                let mut n = (imm as u64 & mask) as u32;
+                if rol {
+                    let width = if matches!(size, OpSize::B8) { 64 } else { 32 };
+                    n = (width - n) & mask as u32;
+                }
+                self.emitter.movz64(Reg::X16, n as u16, 0);
+                Reg::X16
+            }
+            Operand::Reg(GpReg::Rcx, _) => {
+                if rol {
+                    // X16 = (width - rcx) & mask.
+                    let width = if matches!(size, OpSize::B8) { 64 } else { 32 };
+                    self.emitter.movz64(Reg::X16, width as u16, 0);
+                    self.emitter.subs64(Reg::X16, Reg::X16, host_reg(GpReg::Rcx));
+                    Reg::X16
+                } else {
+                    host_reg(GpReg::Rcx)
+                }
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+
+        self.emitter.rorv64(hd, hd, amt_reg);
         if matches!(size, OpSize::B4) {
             self.emit_and_imm_lo32(hd, hd);
         }
@@ -715,30 +894,78 @@ impl<'a> Lifter<'a> {
     fn lift_xor(&mut self, inst: &Inst) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
         let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
-        if let (Operand::Reg(rd, size), Operand::Reg(rs, _)) = (dst, src) {
-            let hd = host_reg(rd);
-            if rd == rs {
-                // Zero idiom — x86 compilers emit `xor reg, reg` to clear.
-                // For 32-bit dest, MOVZ W clears the upper 32 bits as a side
-                // effect, matching x86 semantics; for 64-bit dest, MOVZ X.
-                match size {
-                    OpSize::B8 => self.emitter.movz64(hd, 0, 0),
-                    OpSize::B4 | OpSize::B2 | OpSize::B1 => self.emitter.movz32(hd, 0, 0),
+        match (dst, src) {
+            (Operand::Reg(rd, size), Operand::Reg(rs, _)) => {
+                let hd = host_reg(rd);
+                if rd == rs {
+                    // Zero idiom.
+                    match size {
+                        OpSize::B8 => self.emitter.movz64(hd, 0, 0),
+                        OpSize::B4 | OpSize::B2 | OpSize::B1 => self.emitter.movz32(hd, 0, 0),
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                let hs = host_reg(rs);
+                self.emit_xor_rr(hd, hd, hs, size);
+                Ok(())
             }
-            let hs = host_reg(rs);
-            match size {
-                OpSize::B8 => self.emitter.eor64(hd, hd, hs),
-                OpSize::B4 => {
-                    self.emitter.eor64(hd, hd, hs);
-                    self.emit_and_imm_lo32(hd, hd);
-                }
-                _ => return Err(LifterError::Unsupported(Op::Xor)),
+            (Operand::Reg(rd, size), Operand::Imm(imm, _)) => {
+                let hd = host_reg(rd);
+                self.emitter.load_const64(Reg::X16, imm as u64);
+                self.emit_xor_rr(hd, hd, Reg::X16, size);
+                Ok(())
             }
-            return Ok(());
+            (Operand::Reg(rd, size), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+                let hd = host_reg(rd);
+                self.emit_xor_rr(hd, hd, Reg::X17, size);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rs, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emit_xor_rr(Reg::X17, Reg::X17, host_reg(rs), size);
+                self.store_sized(Reg::X17, Reg::X16, leftover, size);
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Imm(imm, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emitter.load_const64(Reg::X16, imm as u64);
+                self.emit_xor_rr(Reg::X17, Reg::X17, Reg::X16, size);
+                let leftover2 = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.store_sized(Reg::X17, Reg::X16, leftover2, size);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::Xor)),
         }
-        Err(LifterError::Unsupported(Op::Xor))
+    }
+
+    fn emit_xor_rr(&mut self, rd: Reg, ra: Reg, rb: Reg, size: OpSize) {
+        match size {
+            OpSize::B8 => self.emitter.eor64(rd, ra, rb),
+            OpSize::B4 => {
+                self.emitter.eor64(rd, ra, rb);
+                self.emit_and_imm_lo32(rd, rd);
+            }
+            _ => self.emitter.eor64(rd, ra, rb),
+        }
     }
 
     fn lift_lea(&mut self, inst: &Inst) -> LifterResult<()> {
@@ -915,21 +1142,7 @@ impl<'a> Lifter<'a> {
             (Operand::Reg(rd, size), Operand::Reg(rs, _)) => {
                 let hd = host_reg(rd);
                 let hs = host_reg(rs);
-                match (kind, size) {
-                    (ArithKind::Add, OpSize::B8) => self.emitter.adds64(hd, hd, hs),
-                    (ArithKind::Sub, OpSize::B8) => self.emitter.subs64(hd, hd, hs),
-                    (ArithKind::Add, OpSize::B4) => {
-                        self.emitter.adds64(hd, hd, hs);
-                        // Clear upper 32 bits to match x86 semantics for
-                        // 32-bit destinations.
-                        self.emit_and_imm_lo32(hd, hd);
-                    }
-                    (ArithKind::Sub, OpSize::B4) => {
-                        self.emitter.subs64(hd, hd, hs);
-                        self.emit_and_imm_lo32(hd, hd);
-                    }
-                    _ => return Err(LifterError::Unsupported(inst.op)),
-                }
+                self.emit_arith_rr(kind, hd, hd, hs, size);
                 Ok(())
             }
             (Operand::Reg(rd, size), Operand::Imm(imm, _))
@@ -941,12 +1154,103 @@ impl<'a> Lifter<'a> {
                     ArithKind::Sub => self.emitter.subs64_imm(hd, hd, imm as u32),
                 }
                 if matches!(size, OpSize::B4) {
-                    // x86 32-bit dest clears upper 32 bits.
                     self.emit_and_imm_lo32(hd, hd);
                 }
                 Ok(())
             }
+            // reg, imm with imm outside the cheap range → materialise.
+            (Operand::Reg(rd, size), Operand::Imm(imm, _))
+                if matches!(size, OpSize::B8 | OpSize::B4) =>
+            {
+                let hd = host_reg(rd);
+                self.emitter.load_const64(Reg::X17, imm as u64);
+                self.emit_arith_rr(kind, hd, hd, Reg::X17, size);
+                Ok(())
+            }
+            // reg, [mem]: load + arith.
+            (Operand::Reg(rd, size), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+                let hd = host_reg(rd);
+                self.emit_arith_rr(kind, hd, hd, Reg::X17, size);
+                Ok(())
+            }
+            // [mem], reg: load → arith → store.
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rs, _src_size)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                self.emit_arith_rr(kind, Reg::X17, Reg::X17, host_reg(rs), size);
+                self.store_sized(Reg::X17, Reg::X16, leftover, size);
+                Ok(())
+            }
+            // [mem], imm: load → arith imm → store.
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Imm(imm, _)) => {
+                let size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.load_sized(Reg::X17, Reg::X16, leftover, size);
+                // Materialise imm into the X16-relative scratch (X16 already
+                // holds the address — borrow it after the load by saving the
+                // address to a callee-saved nope; we just keep using X16 and
+                // recompute below). Simpler: use a fresh constant load into
+                // X16, since X17 holds the loaded value we need to mutate.
+                let imm_reg = Reg::X16;
+                // X16 currently holds the address; we'll need it again for
+                // the store, so spill it into X28+offset? No — re-derive
+                // the address below. For brevity, recompute the address
+                // after the imm-load.
+                self.emitter.load_const64(imm_reg, imm as u64);
+                self.emit_arith_rr(kind, Reg::X17, Reg::X17, imm_reg, size);
+                // Re-materialise the address into X16 for the store.
+                let leftover2 = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                self.store_sized(Reg::X17, Reg::X16, leftover2, size);
+                Ok(())
+            }
             _ => Err(LifterError::Unsupported(inst.op)),
+        }
+    }
+
+    /// Emit a 32/64-bit ADDS/SUBS into `rd = ra ± rb`, with x86's
+    /// 32-bit upper-clear semantics applied when `size == B4`.
+    fn emit_arith_rr(&mut self, kind: ArithKind, rd: Reg, ra: Reg, rb: Reg, size: OpSize) {
+        match (kind, size) {
+            (ArithKind::Add, OpSize::B8) => self.emitter.adds64(rd, ra, rb),
+            (ArithKind::Sub, OpSize::B8) => self.emitter.subs64(rd, ra, rb),
+            (ArithKind::Add, OpSize::B4) => {
+                self.emitter.adds64(rd, ra, rb);
+                self.emit_and_imm_lo32(rd, rd);
+            }
+            (ArithKind::Sub, OpSize::B4) => {
+                self.emitter.subs64(rd, ra, rb);
+                self.emit_and_imm_lo32(rd, rd);
+            }
+            // For B1/B2 we still go through the 64-bit form; the load
+            // path produced a zero-extended value so the math is right
+            // even if NZCV is set for the wider operands.
+            (ArithKind::Add, _) => self.emitter.adds64(rd, ra, rb),
+            (ArithKind::Sub, _) => self.emitter.subs64(rd, ra, rb),
+        }
+    }
+
+    fn store_sized(&mut self, src: Reg, base: Reg, offset: u32, size: OpSize) {
+        match size {
+            OpSize::B8 => self.emitter.str64(src, base, offset),
+            OpSize::B4 => self.emitter.str32(src, base, offset),
+            OpSize::B2 => self.emitter.strh(src, base, offset),
+            OpSize::B1 => self.emitter.strb(src, base, offset),
         }
     }
 
@@ -1043,6 +1347,7 @@ enum BitOp {
 enum ShiftDir {
     Left,
     Right,
+    ArithRight,
 }
 
 /// Map an x86 GPR to its pinned AArch64 GPR.
