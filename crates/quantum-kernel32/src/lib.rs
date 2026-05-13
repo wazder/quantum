@@ -6,9 +6,11 @@
 //! `ProcessExit` panic raised from `ExitProcess` can propagate cleanly
 //! through the JIT call boundary back to the runner.
 
+pub mod heap;
 pub mod io;
 pub mod process;
 pub mod thunks;
 
+pub use heap::{GetProcessHeap, HeapAlloc, HeapFree};
 pub use process::{ExitProcess, ProcessExit};
 pub use thunks::resolve;

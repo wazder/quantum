@@ -16,6 +16,9 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
         "ExitProcess" => crate::process::ExitProcess as *const (),
         "GetStdHandle" => crate::io::GetStdHandle as *const (),
         "WriteFile" => crate::io::WriteFile as *const (),
+        "GetProcessHeap" => crate::heap::GetProcessHeap as *const (),
+        "HeapAlloc" => crate::heap::HeapAlloc as *const (),
+        "HeapFree" => crate::heap::HeapFree as *const (),
         _ => return None,
     };
     Some(ptr as u64)
