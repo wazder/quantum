@@ -30,6 +30,16 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
         "VirtualAlloc" => crate::vm::VirtualAlloc as *const (),
         "VirtualFree" => crate::vm::VirtualFree as *const (),
         "VirtualProtect" => crate::vm::VirtualProtect as *const (),
+        "InitializeCriticalSection" => crate::sync::InitializeCriticalSection as *const (),
+        "InitializeCriticalSectionAndSpinCount" => {
+            crate::sync::InitializeCriticalSectionAndSpinCount as *const ()
+        }
+        "EnterCriticalSection" => crate::sync::EnterCriticalSection as *const (),
+        "LeaveCriticalSection" => crate::sync::LeaveCriticalSection as *const (),
+        "DeleteCriticalSection" => crate::sync::DeleteCriticalSection as *const (),
+        "TryEnterCriticalSection" => crate::sync::TryEnterCriticalSection as *const (),
+        "SetLastError" => crate::sync::SetLastError as *const (),
+        "GetLastError" => crate::sync::GetLastError as *const (),
         _ => return None,
     };
     Some(ptr as u64)

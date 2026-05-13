@@ -9,6 +9,7 @@
 pub mod heap;
 pub mod io;
 pub mod process;
+pub mod sync;
 pub mod thunks;
 pub mod time;
 pub mod vm;
