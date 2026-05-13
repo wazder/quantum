@@ -362,7 +362,7 @@ pub fn resolve(function: &str) -> Option<u64> {
         "WSASend" | "#113" => WSASend as *const (),
         "WSARecvFrom" | "#112" => WSARecvFrom as *const (),
         "WSASendTo" | "#114" => WSASendTo as *const (),
-        "__WSAFDIsSet" | "#151" => __WSAFDIsSet as *const (),
+        "__WSAFDIsSet" | "#151" | "#51" => __WSAFDIsSet as *const (),
         // BSD socket ordinals.
         "accept" | "#1" => accept as *const (),
         "bind" | "#2" => bind as *const (),

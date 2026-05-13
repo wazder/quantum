@@ -86,6 +86,36 @@ pub extern "C" fn CoInitializeEx(_reserved: *mut c_void, _coinit: u32) -> i32 {
 pub extern "C" fn CoUninitialize() {}
 
 #[unsafe(no_mangle)]
+pub extern "C" fn CoCreateGuid(guid: *mut u8) -> i32 {
+    // GUID is 16 bytes. Fill with random data (low-quality entropy is
+    // fine for non-cryptographic uses).
+    if !guid.is_null() {
+        unsafe {
+            let slice = core::slice::from_raw_parts_mut(guid, 16);
+            crate::advapi32::CryptGenRandom(0, 16, slice.as_mut_ptr());
+            // Set version 4 + variant 1 markers per RFC 4122.
+            slice[7] = (slice[7] & 0x0F) | 0x40;
+            slice[8] = (slice[8] & 0x3F) | 0x80;
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CoSetProxyBlanket(
+    _proxy: *mut c_void,
+    _authn_svc: u32,
+    _authz_svc: u32,
+    _server_principal: *const u16,
+    _authn_level: u32,
+    _imp_level: u32,
+    _auth_info: *mut c_void,
+    _capabilities: u32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn CoCreateInstance(
     _rclsid: *const c_void,
     _outer: *mut c_void,
@@ -181,6 +211,18 @@ pub extern "C" fn CertEnumCertificatesInStore(
     core::ptr::null_mut()
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn CertFindCertificateInStore(
+    _store: *mut c_void,
+    _encoding: u32,
+    _find_flags: u32,
+    _find_type: u32,
+    _find_para: *const c_void,
+    _prev: *mut c_void,
+) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
 // ---------- dinput8 ----------
 
 #[unsafe(no_mangle)]
@@ -219,6 +261,8 @@ pub fn resolve_ole32(function: &str) -> Option<u64> {
         "CoCreateInstance" => CoCreateInstance as *const (),
         "CoTaskMemAlloc" => CoTaskMemAlloc as *const (),
         "CoTaskMemFree" => CoTaskMemFree as *const (),
+        "CoCreateGuid" => CoCreateGuid as *const (),
+        "CoSetProxyBlanket" => CoSetProxyBlanket as *const (),
         _ => return None,
     };
     Some(p as u64)
@@ -240,6 +284,7 @@ pub fn resolve_crypt32(function: &str) -> Option<u64> {
         "CertOpenStore" => CertOpenStore as *const (),
         "CertCloseStore" => CertCloseStore as *const (),
         "CertEnumCertificatesInStore" => CertEnumCertificatesInStore as *const (),
+        "CertFindCertificateInStore" => CertFindCertificateInStore as *const (),
         _ => return None,
     };
     Some(p as u64)
@@ -393,4 +438,74 @@ pub fn resolve_wldap32(function: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+// ---------- MSACM32 (audio compression manager) ----------
+// All 6 Sekiro imports stubbed to MMSYSERR_NOTSUPPORTED (2) so callers
+// fall back to PCM. Real ACM stream support comes with CoreAudio wire.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn acmStreamOpen(
+    _stream: *mut usize,
+    _driver: usize,
+    _src: *mut c_void,
+    _dst: *mut c_void,
+    _wave_filter: *mut c_void,
+    _callback: usize,
+    _instance: usize,
+    _flags: u32,
+) -> u32 {
+    2 // MMSYSERR_NOTSUPPORTED
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn acmStreamClose(_stream: usize, _flags: u32) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn acmStreamSize(
+    _stream: usize,
+    _src_size: u32,
+    _dst_size: *mut u32,
+    _flags: u32,
+) -> u32 {
+    2
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn acmStreamConvert(_stream: usize, _hdr: *mut c_void, _flags: u32) -> u32 {
+    2
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn acmStreamPrepareHeader(_stream: usize, _hdr: *mut c_void, _flags: u32) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn acmStreamUnprepareHeader(_stream: usize, _hdr: *mut c_void, _flags: u32) -> u32 {
+    0
+}
+
+pub fn resolve_msacm32(function: &str) -> Option<u64> {
+    let p: *const () = match function {
+        "acmStreamOpen" => acmStreamOpen as *const (),
+        "acmStreamClose" => acmStreamClose as *const (),
+        "acmStreamSize" => acmStreamSize as *const (),
+        "acmStreamConvert" => acmStreamConvert as *const (),
+        "acmStreamPrepareHeader" => acmStreamPrepareHeader as *const (),
+        "acmStreamUnprepareHeader" => acmStreamUnprepareHeader as *const (),
+        _ => return None,
+    };
+    Some(p as u64)
+}
+
+// ---------- WSOCK32 ----------
+// 16-bit Winsock 1.1 ABI. The 19 Sekiro ordinals fmod imports are all
+// the standard BSD socket family — same names ws2_32 exports. Route
+// through ws2_32's resolver which already handles the same ordinals.
+
+pub fn resolve_wsock32(function: &str) -> Option<u64> {
+    crate::ws2_32::resolve(function)
 }

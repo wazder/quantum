@@ -65,6 +65,12 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("ws2_32.dll") {
         return crate::ws2_32::resolve(function);
     }
+    if dll.eq_ignore_ascii_case("wsock32.dll") {
+        return crate::misc_win::resolve_wsock32(function);
+    }
+    if dll.eq_ignore_ascii_case("msacm32.dll") {
+        return crate::misc_win::resolve_msacm32(function);
+    }
     None
 }
 

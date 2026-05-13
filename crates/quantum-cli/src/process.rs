@@ -86,7 +86,9 @@ impl SideModule {
             }
         } else {
             let named = self.exports.names.iter().find(|n| n.name == function)?;
-            let idx = named.ordinal as usize;
+            // NamedExport.ordinal is already base-biased; entries are
+            // indexed 0..num_funcs.
+            let idx = named.ordinal.checked_sub(self.exports.ordinal_base)? as usize;
             let entry = self.exports.entries.get(idx)?;
             match &entry.target {
                 quantum_loader::ExportTarget::Rva(rva) => {
@@ -218,6 +220,8 @@ fn has_builtin(dll: &str) -> bool {
             | "d3dcompiler_43.dll"
             | "steam_api64.dll"
             | "ntdll.dll"
+            | "wsock32.dll"
+            | "msacm32.dll"
     )
 }
 
@@ -279,6 +283,7 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
 
     if trace {
         let mut unresolved = 0;
+        let mut unresolved_names: Vec<String> = Vec::new();
         for dll in &imp.dlls {
             for entry in &dll.entries {
                 let n = match entry {
@@ -287,6 +292,9 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
                 };
                 if resolver(&dll.name, &n).is_none() {
                     unresolved += 1;
+                    if unresolved_names.len() < 10 {
+                        unresolved_names.push(format!("{}!{n}", dll.name));
+                    }
                 }
             }
         }
@@ -295,6 +303,9 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
             imp.dlls.len(),
             unresolved,
         );
+        if !unresolved_names.is_empty() {
+            eprintln!("[trace] unresolved samples: {unresolved_names:?}");
+        }
     }
     imports::wire_iat(&mut image, &imp, resolver).map_err(RunError::WireIat)?;
 
