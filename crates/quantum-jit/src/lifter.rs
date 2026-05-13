@@ -60,6 +60,8 @@ impl<'a> Lifter<'a> {
             Op::Mov => self.lift_mov(inst),
             Op::Add => self.lift_arith(inst, ArithKind::Add),
             Op::Sub => self.lift_arith(inst, ArithKind::Sub),
+            Op::Xor => self.lift_xor(inst),
+            Op::Lea => self.lift_lea(inst),
             Op::Cmp => self.lift_cmp(inst),
             Op::CallIndirect => self.lift_call_indirect(inst),
             Op::Ret => {
@@ -195,8 +197,28 @@ impl<'a> Lifter<'a> {
         let leftover = self.addr_into_xtmp(&target, inst, Reg::X16)?;
         // X16 = *X16  (load the function pointer from the slot).
         self.emitter.ldr64(Reg::X16, Reg::X16, leftover);
-        // Marshal: AAPCS64 arg0 = guest RCX (which is X1 in our pinning).
-        self.emitter.mov64(Reg::X0, Reg::X1);
+        // Multi-argument Win64 -> AAPCS64 marshaling.
+        //
+        // Win64 places args 1..4 in RCX/RDX/R8/R9; AAPCS64 puts them in
+        // X0/X1/X2/X3. In our pinning RCX=X1, RDX=X2, R8=X8, R9=X9.
+        //
+        // The four moves below are sequenced so each write happens
+        // *after* the next source is read. That avoids any scratch
+        // saving (and crucially avoids touching AArch64 callee-saved
+        // registers X19..X28, which would corrupt the host caller's
+        // state and surface as a SIGSEGV on return).
+        self.emitter.mov64(Reg::X0, Reg::X1); // arg0 <- RCX
+        self.emitter.mov64(Reg::X1, Reg::X2); // arg1 <- RDX
+        self.emitter.mov64(Reg::X2, Reg::X8); // arg2 <- R8
+        self.emitter.mov64(Reg::X3, Reg::x(9)); // arg3 <- R9
+        // Args 5+ in Win64 live on the guest stack at [rsp+32], [rsp+40], ...
+        // In AAPCS64 the 5th+ args go on the host stack too. We don't
+        // wire that path yet, but several common thunks (WriteFile's
+        // OVERLAPPED, etc.) accept NULL for those slots, so zero X4 as
+        // a safe default. Callees that need a real 5th arg will see 0;
+        // we add a real marshaling path in a follow-up.
+        self.emitter.movz64(Reg::X4, 0, 0);
+
         // Save host frame & link register across the call so the lifted
         // block can still RET to its original host caller afterwards.
         // 16-byte stack alignment is preserved by stp/ldp pre/post-index.
@@ -205,6 +227,64 @@ impl<'a> Lifter<'a> {
         self.emitter.blr(Reg::X16);
         self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
         Ok(())
+    }
+
+    fn lift_xor(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        if let (Operand::Reg(rd, size), Operand::Reg(rs, _)) = (dst, src) {
+            let hd = host_reg(rd);
+            if rd == rs {
+                // Zero idiom — x86 compilers emit `xor reg, reg` to clear.
+                // For 32-bit dest, MOVZ W clears the upper 32 bits as a side
+                // effect, matching x86 semantics; for 64-bit dest, MOVZ X.
+                match size {
+                    OpSize::B8 => self.emitter.movz64(hd, 0, 0),
+                    OpSize::B4 | OpSize::B2 | OpSize::B1 => self.emitter.movz32(hd, 0, 0),
+                }
+                return Ok(());
+            }
+            let hs = host_reg(rs);
+            match size {
+                OpSize::B8 => self.emitter.eor64(hd, hd, hs),
+                OpSize::B4 => {
+                    self.emitter.eor64(hd, hd, hs);
+                    self.emit_and_imm_lo32(hd, hd);
+                }
+                _ => return Err(LifterError::Unsupported(Op::Xor)),
+            }
+            return Ok(());
+        }
+        Err(LifterError::Unsupported(Op::Xor))
+    }
+
+    fn lift_lea(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        if let Operand::Reg(rd, size) = dst {
+            let hd = host_reg(rd);
+            // Compute effective address into the destination register.
+            let leftover = match src {
+                Operand::Mem(m) => self.mem_address_into(m, hd),
+                Operand::RipRel(disp, _) => {
+                    let target = inst
+                        .guest_rip
+                        .wrapping_add(inst.len as u64)
+                        .wrapping_add(disp as u64);
+                    self.emitter.load_const64(hd, target);
+                    0
+                }
+                _ => return Err(LifterError::Unsupported(Op::Lea)),
+            };
+            if leftover != 0 {
+                self.emitter.add64_imm(hd, hd, leftover);
+            }
+            if matches!(size, OpSize::B4) {
+                self.emit_and_imm_lo32(hd, hd);
+            }
+            return Ok(());
+        }
+        Err(LifterError::Unsupported(Op::Lea))
     }
 
     fn lift_mov(&mut self, inst: &Inst) -> LifterResult<()> {
