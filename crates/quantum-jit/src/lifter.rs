@@ -71,6 +71,8 @@ impl<'a> Lifter<'a> {
             Op::Cmp => self.lift_cmp(inst),
             Op::Inc => self.lift_inc_dec(inst, true),
             Op::Dec => self.lift_inc_dec(inst, false),
+            Op::Shl => self.lift_shift(inst, ShiftDir::Left),
+            Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Cmov(cond) => self.lift_cmov(inst, cond),
             Op::Set(cond) => self.lift_set(inst, cond),
             Op::Push => self.lift_push(inst),
@@ -420,6 +422,51 @@ impl<'a> Lifter<'a> {
         Err(LifterError::Unsupported(inst.op))
     }
 
+    /// SHL/SHR r, imm8 or r, CL. We use AArch64's variable-shift
+    /// instructions (LSLV/LSRV) through scratch X16 to avoid having to
+    /// teach the emitter the UBFM/SBFM immediate encodings yet.
+    ///
+    /// 32-bit operands: result is masked to the low 32 bits afterwards,
+    /// matching x86's zero-extending semantics. SAR (signed arithmetic
+    /// shift) is deferred until we add 32-bit shift helpers — naive
+    /// 64-bit ASR on a movz32-zero-extended value treats bit 63 as
+    /// the sign rather than bit 31.
+    fn lift_shift(&mut self, inst: &Inst, dir: ShiftDir) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let amt = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (rd, size) = match dst {
+            Operand::Reg(r, s) => (r, s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let hd = host_reg(rd);
+
+        let amt_reg = match amt {
+            Operand::Imm(imm, _) => {
+                // x86 masks the count to 5 bits (32-bit dst) or 6 bits
+                // (64-bit dst). We do the same here.
+                let mask = if matches!(size, OpSize::B8) {
+                    0x3F
+                } else {
+                    0x1F
+                };
+                let value = (imm as u64 & mask) as u16;
+                self.emitter.movz64(Reg::X16, value, 0);
+                Reg::X16
+            }
+            Operand::Reg(GpReg::Rcx, _) => host_reg(GpReg::Rcx),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+
+        match dir {
+            ShiftDir::Left => self.emitter.lslv64(hd, hd, amt_reg),
+            ShiftDir::Right => self.emitter.lsrv64(hd, hd, amt_reg),
+        }
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(hd, hd);
+        }
+        Ok(())
+    }
+
     /// CMOVcc rd, rs — conditional move.
     ///   CSEL Xd, <rs-or-rd>, <rs-or-rd>, <cond>
     /// We emit CSEL Xd, Xs, Xd, <cond> — pick source when cond true,
@@ -705,6 +752,12 @@ enum ArithKind {
 enum BitOp {
     And,
     Or,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShiftDir {
+    Left,
+    Right,
 }
 
 /// Map an x86 GPR to its pinned AArch64 GPR.

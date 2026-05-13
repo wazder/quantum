@@ -141,6 +141,37 @@ fn and_or_inc_dec_chain() {
 }
 
 #[test]
+fn shl_shr_imm_chain() {
+    // mov rax, 5            ; 48 C7 C0 05 00 00 00
+    // shl rax, 4            ; 48 C1 E0 04          -> rax = 80
+    // shr rax, 1            ; 48 D1 E8             -> rax = 40
+    // ret
+    let bytes = [
+        0x48, 0xC7, 0xC0, 0x05, 0x00, 0x00, 0x00, // mov rax, 5
+        0x48, 0xC1, 0xE0, 0x04, // shl rax, 4
+        0x48, 0xD1, 0xE8, // shr rax, 1
+        0xC3,
+    ];
+    assert_eq!(run_returns_u64(&bytes), 40);
+}
+
+#[test]
+fn shl_by_cl_register() {
+    // mov rax, 3            ; 48 C7 C0 03 00 00 00
+    // mov cl, 5             ; B1 05  (mov r8, imm8 form for cl)
+    // shl rax, cl           ; 48 D3 E0
+    // ret
+    let bytes = [
+        0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00, // mov rax, 3
+        0xB1, 0x05, // mov cl, 5
+        0x48, 0xD3, 0xE0, // shl rax, cl
+        0xC3,
+    ];
+    // 3 << 5 = 96
+    assert_eq!(run_returns_u64(&bytes), 96);
+}
+
+#[test]
 fn cmov_picks_branch_on_flag() {
     // mov eax, 11           ; B8 0B 00 00 00
     // mov ebx, 22           ; BB 16 00 00 00
