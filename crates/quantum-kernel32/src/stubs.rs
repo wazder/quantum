@@ -622,3 +622,955 @@ pub extern "C" fn ChangeTimerQueueTimer(
 pub extern "C" fn DeleteTimerQueueTimer(_queue: usize, _timer: usize, _event: usize) -> i32 {
     1
 }
+
+// =============== File I/O (mostly stubs, real work later) ===============
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateFileA(
+    _name: *const i8,
+    _access: u32,
+    _share: u32,
+    _sa: *mut c_void,
+    _disp: u32,
+    _flags: u32,
+    _tmpl: usize,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateFileW(
+    _name: *const u16,
+    _access: u32,
+    _share: u32,
+    _sa: *mut c_void,
+    _disp: u32,
+    _flags: u32,
+    _tmpl: usize,
+) -> usize {
+    usize::MAX
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ReadFile(
+    _h: usize,
+    _buf: *mut c_void,
+    _bytes: u32,
+    bytes_read_out: *mut u32,
+    _ovl: *mut c_void,
+) -> i32 {
+    if !bytes_read_out.is_null() {
+        unsafe { *bytes_read_out = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FlushFileBuffers(_h: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetFilePointer(_h: usize, _low: i32, _high: *mut i32, _method: u32) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetFilePointerEx(_h: usize, _dist: i64, new_pos: *mut i64, _method: u32) -> i32 {
+    if !new_pos.is_null() {
+        unsafe { *new_pos = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetEndOfFile(_h: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFileSize(_h: usize, _high: *mut u32) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFileType(_h: usize) -> u32 {
+    1 // FILE_TYPE_DISK
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFileAttributesA(_name: *const i8) -> u32 {
+    0xFFFF_FFFF // INVALID_FILE_ATTRIBUTES
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFileAttributesW(_name: *const u16) -> u32 {
+    0xFFFF_FFFF
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFileAttributesExW(_name: *const u16, _level: u32, _info: *mut c_void) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetFileAttributesW(_name: *const u16, _attrs: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFileInformationByHandle(_h: usize, _info: *mut c_void) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FindFirstFileW(_name: *const u16, _data: *mut c_void) -> usize {
+    usize::MAX
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FindFirstFileExW(
+    _name: *const u16,
+    _level: u32,
+    _data: *mut c_void,
+    _search: u32,
+    _filter: *mut c_void,
+    _flags: u32,
+) -> usize {
+    usize::MAX
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FindNextFileW(_h: usize, _data: *mut c_void) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FindClose(_h: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateDirectoryW(_name: *const u16, _sa: *mut c_void) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RemoveDirectoryW(_name: *const u16) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DeleteFileW(_name: *const u16) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn MoveFileW(_old: *const u16, _new: *const u16) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn MoveFileExW(_old: *const u16, _new: *const u16, _flags: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CopyFileW(_src: *const u16, _dst: *const u16, _fail_if_exists: i32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetCurrentDirectoryW(size: u32, buffer: *mut u16) -> u32 {
+    if !buffer.is_null() && size > 0 {
+        unsafe { *buffer = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetFullPathNameW(
+    _name: *const u16,
+    _size: u32,
+    buffer: *mut u16,
+    _file_part: *mut *mut u16,
+) -> u32 {
+    if !buffer.is_null() {
+        unsafe { *buffer = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetTempPathW(size: u32, buffer: *mut u16) -> u32 {
+    let s = [
+        b'/' as u16,
+        b't' as u16,
+        b'm' as u16,
+        b'p' as u16,
+        b'/' as u16,
+        0,
+    ];
+    if buffer.is_null() || (size as usize) < s.len() {
+        return s.len() as u32;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), buffer, s.len());
+    }
+    (s.len() - 1) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetTempFileNameW(
+    _path: *const u16,
+    _prefix: *const u16,
+    _unique: u32,
+    buffer: *mut u16,
+) -> u32 {
+    if !buffer.is_null() {
+        unsafe { *buffer = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetDriveTypeW(_path: *const u16) -> u32 {
+    3 // DRIVE_FIXED
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetDiskFreeSpaceW(
+    _path: *const u16,
+    sec_cluster: *mut u32,
+    bytes_sec: *mut u32,
+    free_clusters: *mut u32,
+    total_clusters: *mut u32,
+) -> i32 {
+    for (p, v) in [sec_cluster, bytes_sec, free_clusters, total_clusters]
+        .into_iter()
+        .zip([8u32, 512, 1_000_000, 2_000_000])
+    {
+        if !p.is_null() {
+            unsafe { *p = v };
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetDiskFreeSpaceExW(
+    _path: *const u16,
+    free_to_caller: *mut u64,
+    total: *mut u64,
+    total_free: *mut u64,
+) -> i32 {
+    for (p, v) in [free_to_caller, total, total_free].into_iter().zip([
+        10u64 << 30,
+        100u64 << 30,
+        50u64 << 30,
+    ]) {
+        if !p.is_null() {
+            unsafe { *p = v };
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ReadDirectoryChangesW(
+    _h: usize,
+    _buf: *mut c_void,
+    _len: u32,
+    _watch_sub: i32,
+    _filter: u32,
+    _bytes_returned: *mut u32,
+    _ovl: *mut c_void,
+    _completion: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ReadConsoleA(
+    _h: usize,
+    _buf: *mut c_void,
+    _chars_to_read: u32,
+    chars_read: *mut u32,
+    _ctrl: *mut c_void,
+) -> i32 {
+    if !chars_read.is_null() {
+        unsafe { *chars_read = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ReadConsoleW(
+    _h: usize,
+    _buf: *mut c_void,
+    _chars_to_read: u32,
+    chars_read: *mut u32,
+    _ctrl: *mut c_void,
+) -> i32 {
+    if !chars_read.is_null() {
+        unsafe { *chars_read = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn WriteConsoleW(
+    _h: usize,
+    _buf: *const c_void,
+    chars_to_write: u32,
+    chars_written: *mut u32,
+    _reserved: *mut c_void,
+) -> i32 {
+    if !chars_written.is_null() {
+        unsafe { *chars_written = chars_to_write };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetConsoleMode(_h: usize, mode_out: *mut u32) -> i32 {
+    if !mode_out.is_null() {
+        unsafe { *mode_out = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetConsoleMode(_h: usize, _mode: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetConsoleCP() -> u32 {
+    437
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetConsoleCtrlHandler(_handler: *mut c_void, _add: i32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn OutputDebugStringA(s: *const i8) {
+    if s.is_null() {
+        return;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *s.add(len) != 0 && len < 4096 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(s.cast::<u8>(), len) };
+    if let Ok(msg) = core::str::from_utf8(slice) {
+        eprintln!("[guest debug] {msg}");
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn OutputDebugStringW(s: *const u16) {
+    if s.is_null() {
+        return;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *s.add(len) != 0 && len < 4096 {
+            len += 1;
+        }
+    }
+    let slice = unsafe { core::slice::from_raw_parts(s, len) };
+    let msg = String::from_utf16_lossy(slice);
+    eprintln!("[guest debug] {msg}");
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreatePipe(
+    read_out: *mut usize,
+    write_out: *mut usize,
+    _sa: *mut c_void,
+    _size: u32,
+) -> i32 {
+    if !read_out.is_null() {
+        unsafe { *read_out = usize::MAX };
+    }
+    if !write_out.is_null() {
+        unsafe { *write_out = usize::MAX };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PeekNamedPipe(
+    _h: usize,
+    _buf: *mut c_void,
+    _size: u32,
+    bytes_read: *mut u32,
+    bytes_avail: *mut u32,
+    bytes_left: *mut u32,
+) -> i32 {
+    for p in [bytes_read, bytes_avail, bytes_left] {
+        if !p.is_null() {
+            unsafe { *p = 0 };
+        }
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetOverlappedResult(
+    _h: usize,
+    _ovl: *mut c_void,
+    transferred: *mut u32,
+    _wait: i32,
+) -> i32 {
+    if !transferred.is_null() {
+        unsafe { *transferred = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CancelIo(_h: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetHandleInformation(_h: usize, _mask: u32, _flags: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetStdHandle(_n: u32, _h: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetErrorMode(_mode: u32) -> u32 {
+    0
+}
+
+// =============== TLS (thread-local storage slots) ===============
+
+const MAX_TLS: usize = 1088; // Win64 TLS_MINIMUM_AVAILABLE + extended
+thread_local! {
+    static TLS_SLOTS: std::cell::RefCell<Vec<*mut c_void>> =
+        std::cell::RefCell::new(vec![core::ptr::null_mut(); MAX_TLS]);
+}
+static TLS_USED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn TlsAlloc() -> u32 {
+    let idx = TLS_USED.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    if idx >= MAX_TLS {
+        return 0xFFFF_FFFF; // TLS_OUT_OF_INDEXES
+    }
+    idx as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn TlsFree(_idx: u32) -> i32 {
+    // We don't recycle TLS indices.
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn TlsGetValue(idx: u32) -> *mut c_void {
+    if (idx as usize) >= MAX_TLS {
+        return core::ptr::null_mut();
+    }
+    TLS_SLOTS.with(|s| s.borrow()[idx as usize])
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn TlsSetValue(idx: u32, val: *mut c_void) -> i32 {
+    if (idx as usize) >= MAX_TLS {
+        return 0;
+    }
+    TLS_SLOTS.with(|s| s.borrow_mut()[idx as usize] = val);
+    1
+}
+
+// =============== Local / Global alloc (legacy aliases for heap) ===============
+
+#[unsafe(no_mangle)]
+pub extern "C" fn LocalAlloc(_flags: u32, size: usize) -> *mut u8 {
+    crate::heap::HeapAlloc(crate::heap::DEFAULT_HEAP_HANDLE, 0, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn LocalFree(p: *mut u8) -> *mut u8 {
+    crate::heap::HeapFree(crate::heap::DEFAULT_HEAP_HANDLE, 0, p);
+    core::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GlobalAlloc(_flags: u32, size: usize) -> *mut u8 {
+    crate::heap::HeapAlloc(crate::heap::DEFAULT_HEAP_HANDLE, 0, size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GlobalFree(p: *mut u8) -> *mut u8 {
+    crate::heap::HeapFree(crate::heap::DEFAULT_HEAP_HANDLE, 0, p);
+    core::ptr::null_mut()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GlobalLock(p: *mut u8) -> *mut u8 {
+    p
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GlobalUnlock(_p: *mut u8) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GlobalMemoryStatus(_info: *mut c_void) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapReAlloc(_h: usize, _flags: u32, _mem: *mut u8, new_size: usize) -> *mut u8 {
+    // Naive: just allocate fresh, content is lost. Real impl would
+    // copy from the existing block.
+    crate::heap::HeapAlloc(crate::heap::DEFAULT_HEAP_HANDLE, 0, new_size)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapSize(_h: usize, _flags: u32, _mem: *const u8) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn HeapQueryInformation(
+    _h: usize,
+    _class: u32,
+    _info: *mut c_void,
+    _info_size: usize,
+    return_size: *mut usize,
+) -> i32 {
+    if !return_size.is_null() {
+        unsafe { *return_size = 0 };
+    }
+    1
+}
+
+// =============== String conversions ===============
+
+#[unsafe(no_mangle)]
+pub extern "C" fn MultiByteToWideChar(
+    _cp: u32,
+    _flags: u32,
+    src: *const i8,
+    src_len: i32,
+    dst: *mut u16,
+    dst_len: i32,
+) -> i32 {
+    if src.is_null() {
+        return 0;
+    }
+    let n = if src_len < 0 {
+        let mut n = 0;
+        unsafe {
+            while *src.add(n) != 0 {
+                n += 1;
+            }
+        }
+        n + 1
+    } else {
+        src_len as usize
+    };
+    let need = n;
+    if dst.is_null() || dst_len == 0 {
+        return need as i32;
+    }
+    let to_copy = (n).min(dst_len as usize);
+    unsafe {
+        for i in 0..to_copy {
+            *dst.add(i) = *src.add(i) as u8 as u16;
+        }
+    }
+    to_copy as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn WideCharToMultiByte(
+    _cp: u32,
+    _flags: u32,
+    src: *const u16,
+    src_len: i32,
+    dst: *mut i8,
+    dst_len: i32,
+    _default_char: *const i8,
+    _used_default_char: *mut i32,
+) -> i32 {
+    if src.is_null() {
+        return 0;
+    }
+    let n = if src_len < 0 {
+        let mut n = 0;
+        unsafe {
+            while *src.add(n) != 0 {
+                n += 1;
+            }
+        }
+        n + 1
+    } else {
+        src_len as usize
+    };
+    if dst.is_null() || dst_len == 0 {
+        return n as i32;
+    }
+    let to_copy = n.min(dst_len as usize);
+    unsafe {
+        for i in 0..to_copy {
+            let w = *src.add(i);
+            *dst.add(i) = if w < 128 { w as i8 } else { b'?' as i8 };
+        }
+    }
+    to_copy as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn IsValidCodePage(_cp: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn IsValidLocale(_lcid: u32, _flags: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FormatMessageA(
+    _flags: u32,
+    _src: *const c_void,
+    _msg_id: u32,
+    _lang: u32,
+    buffer: *mut i8,
+    size: u32,
+    _args: *mut c_void,
+) -> u32 {
+    if !buffer.is_null() && size > 0 {
+        unsafe { *buffer = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FormatMessageW(
+    _flags: u32,
+    _src: *const c_void,
+    _msg_id: u32,
+    _lang: u32,
+    buffer: *mut u16,
+    size: u32,
+    _args: *mut c_void,
+) -> u32 {
+    if !buffer.is_null() && size > 0 {
+        unsafe { *buffer = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ExpandEnvironmentStringsA(src: *const i8, dst: *mut i8, size: u32) -> u32 {
+    if src.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *src.add(len) != 0 && len < 4096 {
+            len += 1;
+        }
+    }
+    let need = (len + 1) as u32;
+    if dst.is_null() || size < need {
+        return need;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, len + 1);
+    }
+    need
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn EnumSystemLocalesW(_proc: *mut c_void, _flags: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetSystemDefaultLangID() -> u16 {
+    0x0409 // en-US
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetUserDefaultLangID() -> u16 {
+    0x0409
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetSystemDefaultLocaleName(buffer: *mut u16, size: i32) -> i32 {
+    let s = [
+        b'e' as u16,
+        b'n' as u16,
+        b'-' as u16,
+        b'U' as u16,
+        b'S' as u16,
+        0,
+    ];
+    if buffer.is_null() || (size as usize) < s.len() {
+        return s.len() as i32;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(s.as_ptr(), buffer, s.len());
+    }
+    s.len() as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetDateFormatW(
+    _lcid: u32,
+    _flags: u32,
+    _date: *const c_void,
+    _format: *const u16,
+    buffer: *mut u16,
+    size: i32,
+) -> i32 {
+    if !buffer.is_null() && size > 0 {
+        unsafe { *buffer = 0 };
+    }
+    1
+}
+
+// =============== Process / Thread (continued) ===============
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateProcessA(
+    _app: *const i8,
+    _cmdline: *mut i8,
+    _proc_sa: *mut c_void,
+    _thr_sa: *mut c_void,
+    _inherit: i32,
+    _flags: u32,
+    _env: *mut c_void,
+    _cwd: *const i8,
+    _startinfo: *mut c_void,
+    _procinfo: *mut c_void,
+) -> i32 {
+    0 // failure — we don't spawn subprocesses
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetExitCodeProcess(_h: usize, code_out: *mut u32) -> i32 {
+    if !code_out.is_null() {
+        unsafe { *code_out = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetExitCodeThread(_h: usize, code_out: *mut u32) -> i32 {
+    if !code_out.is_null() {
+        unsafe { *code_out = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn OpenThread(_access: u32, _inherit: i32, _id: u32) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ResumeThread(_h: usize) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SuspendThread(_h: usize) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn TerminateThread(_h: usize, _code: u32) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetThreadAffinityMask(_h: usize, _mask: usize) -> usize {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetThreadIdealProcessor(_h: usize, _id: u32) -> u32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetProcessAffinityMask(_h: usize, _mask: usize) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetProcessAffinityMask(
+    _h: usize,
+    proc_mask: *mut usize,
+    sys_mask: *mut usize,
+) -> i32 {
+    if !proc_mask.is_null() {
+        unsafe { *proc_mask = 0xFF };
+    }
+    if !sys_mask.is_null() {
+        unsafe { *sys_mask = 0xFF };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SleepEx(ms: u32, _alertable: i32) -> u32 {
+    crate::time::Sleep(ms);
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn QueueUserAPC(_proc: *mut c_void, _h: usize, _data: usize) -> u32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RaiseException(_code: u32, _flags: u32, _n: u32, _args: *const u64) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn ConvertFiberToThread() -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn DeleteFiber(_fiber: *mut c_void) {}
+
+// =============== Module info ===============
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetModuleFileNameA(_h: usize, buffer: *mut i8, size: u32) -> u32 {
+    let path = b"quantum.exe\0";
+    if buffer.is_null() || size < path.len() as u32 {
+        return 0;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr().cast::<i8>(), buffer, path.len());
+    }
+    (path.len() - 1) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetModuleFileNameW(_h: usize, buffer: *mut u16, size: u32) -> u32 {
+    let path: [u16; 12] = [
+        b'q' as u16,
+        b'u' as u16,
+        b'a' as u16,
+        b'n' as u16,
+        b't' as u16,
+        b'u' as u16,
+        b'm' as u16,
+        b'.' as u16,
+        b'e' as u16,
+        b'x' as u16,
+        b'e' as u16,
+        0,
+    ];
+    if buffer.is_null() || (size as usize) < path.len() {
+        return 0;
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), buffer, path.len());
+    }
+    (path.len() - 1) as u32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetModuleHandleExW(_flags: u32, _name: *const u16, h_out: *mut usize) -> i32 {
+    if !h_out.is_null() {
+        unsafe { *h_out = crate::modules::HANDLE_KERNEL32 };
+    }
+    1
+}
+
+// =============== System info / version ===============
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetSystemInfo(info: *mut c_void) {
+    if info.is_null() {
+        return;
+    }
+    // SYSTEM_INFO is 48 bytes on x64. Zero everything, set a few key fields.
+    unsafe {
+        core::ptr::write_bytes(info, 0, 48);
+        // wProcessorArchitecture at +0 -> PROCESSOR_ARCHITECTURE_AMD64 = 9
+        *info.cast::<u16>() = 9;
+        // dwPageSize at +4 -> 16384 (Apple Silicon native page)
+        *info.cast::<u32>().add(1) = 16384;
+        // dwNumberOfProcessors at +0x20
+        *info.cast::<u32>().add(8) =
+            std::thread::available_parallelism().map_or(8, |n| n.get() as u32);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetLocalTime(_st: *mut c_void) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FileTimeToLocalFileTime(_ft: *const u64, lft: *mut u64) -> i32 {
+    if !lft.is_null() {
+        unsafe { *lft = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn LocalFileTimeToFileTime(_lft: *const u64, ft: *mut u64) -> i32 {
+    if !ft.is_null() {
+        unsafe { *ft = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FileTimeToSystemTime(_ft: *const u64, _st: *mut c_void) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SystemTimeToFileTime(_st: *const c_void, ft: *mut u64) -> i32 {
+    if !ft.is_null() {
+        unsafe { *ft = 0 };
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SystemTimeToTzSpecificLocalTime(
+    _tz: *const c_void,
+    _ust: *const c_void,
+    _lst: *mut c_void,
+) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn VerSetConditionMask(_mask: u64, _type: u32, _cond: u8) -> u64 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn VerifyVersionInfoW(_info: *mut c_void, _type: u32, _mask: u64) -> i32 {
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn VirtualQuery(_addr: *const c_void, _info: *mut c_void, _len: usize) -> usize {
+    0
+}

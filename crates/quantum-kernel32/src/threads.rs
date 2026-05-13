@@ -58,6 +58,15 @@ pub extern "C" fn SetEvent(handle: usize) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn PulseEvent(handle: usize) -> i32 {
+    let r = SetEvent(handle);
+    if r != 0 {
+        ResetEvent(handle);
+    }
+    r
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn ResetEvent(handle: usize) -> i32 {
     if let Some(obj) = handles::get(handle) {
         if let KernelObject::Event { signaled, .. } = &*obj {
