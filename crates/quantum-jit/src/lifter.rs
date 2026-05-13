@@ -119,6 +119,8 @@ impl<'a> Lifter<'a> {
                 Ok(())
             }
             Op::Xchg => self.lift_xchg(inst),
+            Op::Bsr => self.lift_bitscan(inst, true),
+            Op::Bsf => self.lift_bitscan(inst, false),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -781,6 +783,60 @@ impl<'a> Lifter<'a> {
             }
             _ => Err(LifterError::Unsupported(inst.op)),
         }
+    }
+
+    /// BSR / BSF — bit-scan reverse / forward.
+    /// BSR: index of highest set bit (=> 63 - clz(x) for B8, 31 - clz(x) for B4).
+    /// BSF: index of lowest set bit (=> clz(rbit(x))).
+    /// If source is 0, the dest is undefined and ZF=1; otherwise ZF=0.
+    /// We don't model the precise flags semantics; consumers that read
+    /// ZF after BSR/BSF tend to use TEST first.
+    fn lift_bitscan(&mut self, inst: &Inst, reverse: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (rd, size) = match dst {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        // Source value into X17.
+        match src {
+            Operand::Reg(rs, _) => self.emitter.mov64(Reg::X17, host_reg(rs)),
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // For B4 mask the source to 32 bits so CLZ counts within the
+        // 32-bit value.
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(Reg::X17, Reg::X17);
+        }
+        if reverse {
+            // CLZ Xd, Xs:  0xDAC0_1000 | (Rn<<5) | Rd
+            let w = 0xDAC0_1000 | ((Reg::X17.raw() as u32) << 5) | (rd.raw() as u32);
+            self.emitter.raw_word(w);
+            // rd = (width - 1) - rd. For B4 width=32, for B8 width=64.
+            let max_bit = if matches!(size, OpSize::B8) { 63 } else { 31 };
+            self.emitter.load_const64(Reg::X16, max_bit);
+            self.emitter.subs64(rd, Reg::X16, rd);
+        } else {
+            // RBIT Xd, Xs:  0xDAC0_0000 | (Rn<<5) | Rd
+            let rbit = 0xDAC0_0000 | ((Reg::X17.raw() as u32) << 5) | (rd.raw() as u32);
+            self.emitter.raw_word(rbit);
+            // CLZ Xd, Xd.
+            let clz = 0xDAC0_1000 | ((rd.raw() as u32) << 5) | (rd.raw() as u32);
+            self.emitter.raw_word(clz);
+        }
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(rd, rd);
+        }
+        Ok(())
     }
 
     /// XCHG. We support the common shapes: reg/reg and reg/mem (mem/reg
