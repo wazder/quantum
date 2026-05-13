@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod block;
 pub mod decoder;
 pub mod emitter;
 pub mod iform;

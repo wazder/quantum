@@ -430,13 +430,17 @@ impl<'a> Lifter<'a> {
                 }
                 Ok(())
             }
-            (Operand::Reg(rd, OpSize::B8), Operand::Imm(imm, _))
-                if (0..(1 << 24)).contains(&imm) =>
+            (Operand::Reg(rd, size), Operand::Imm(imm, _))
+                if (0..(1 << 24)).contains(&imm) && matches!(size, OpSize::B8 | OpSize::B4) =>
             {
                 let hd = host_reg(rd);
                 match kind {
                     ArithKind::Add => self.emitter.adds64_imm(hd, hd, imm as u32),
                     ArithKind::Sub => self.emitter.subs64_imm(hd, hd, imm as u32),
+                }
+                if matches!(size, OpSize::B4) {
+                    // x86 32-bit dest clears upper 32 bits.
+                    self.emit_and_imm_lo32(hd, hd);
                 }
                 Ok(())
             }
