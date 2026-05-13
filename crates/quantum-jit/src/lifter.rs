@@ -32,7 +32,7 @@
 //! so the caller can decide whether to fall back or bail.
 
 use crate::emitter::{Cond as A64Cond, Emitter, Reg};
-use crate::iform::{Cond as XCond, GpReg, Inst, Op, OpSize, Operand};
+use crate::iform::{Cond as XCond, GpReg, Inst, Mem, Op, OpSize, Operand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifterError {
@@ -61,6 +61,7 @@ impl<'a> Lifter<'a> {
             Op::Add => self.lift_arith(inst, ArithKind::Add),
             Op::Sub => self.lift_arith(inst, ArithKind::Sub),
             Op::Cmp => self.lift_cmp(inst),
+            Op::CallIndirect => self.lift_call_indirect(inst),
             Op::Ret => {
                 // For now treat RET as a host RET. Once we wire the
                 // dispatcher this becomes a return-to-dispatcher trampoline.
@@ -87,6 +88,124 @@ impl<'a> Lifter<'a> {
         }
     }
 
+    /// Compute the effective guest address of a memory operand into
+    /// scratch register `X16` (`xtmp`).
+    ///
+    /// For `[base + index*scale + disp]` we materialise the address with
+    /// an `add base, index << log2(scale)` plus an immediate offset; if
+    /// the displacement is small enough, we leave it for the final
+    /// LDR/STR offset so we don't emit a redundant ADD.
+    ///
+    /// For `RipRel(disp, size)` the effective guest address is fixed at
+    /// translate time: `inst.guest_rip + inst.len + disp`. We embed it
+    /// as a 64-bit immediate via `load_const64`.
+    fn addr_into_xtmp(&mut self, op: &Operand, inst: &Inst, xtmp: Reg) -> LifterResult<u32> {
+        match *op {
+            Operand::Mem(m) => Ok(self.mem_address_into(m, xtmp)),
+            Operand::RipRel(disp, _) => {
+                let target = inst.guest_rip
+                    .wrapping_add(inst.len as u64)
+                    .wrapping_add(disp as u64);
+                self.emitter.load_const64(xtmp, target);
+                Ok(0)
+            }
+            _ => Err(LifterError::BadOperands),
+        }
+    }
+
+    /// Materialise `m`'s effective address into `xtmp`, returning the
+    /// leftover constant displacement that the caller may fold into the
+    /// LDR/STR unsigned offset (0 if everything was added in).
+    fn mem_address_into(&mut self, m: Mem, xtmp: Reg) -> u32 {
+        if let Some(base) = m.base {
+            self.emitter.mov64(xtmp, host_reg(base));
+        } else {
+            // No base — start from zero.
+            self.emitter.load_const64(xtmp, 0);
+        }
+
+        if let Some(index) = m.index {
+            let hi = host_reg(index);
+            match m.scale {
+                1 => self.emitter.add64(xtmp, xtmp, hi),
+                2 | 4 | 8 => {
+                    // ADD Xd, Xn, Xm, LSL #shift.
+                    let shift = match m.scale {
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        _ => 0,
+                    };
+                    self.emit_add_lsl64(xtmp, xtmp, hi, shift);
+                }
+                _ => self.emitter.add64(xtmp, xtmp, hi),
+            }
+        }
+
+        if m.disp == 0 {
+            return 0;
+        }
+
+        // Try to fold positive small disp into the LDR/STR offset (caller
+        // does the alignment scaling). Otherwise add it now.
+        if m.disp > 0 && (m.disp as u32) < (1 << 24) {
+            return m.disp as u32;
+        }
+        if m.disp > 0 {
+            self.emitter.add64_imm(xtmp, xtmp, m.disp as u32);
+        } else {
+            let abs = m.disp.unsigned_abs();
+            if abs < (1 << 24) {
+                self.emitter.sub64_imm(xtmp, xtmp, abs);
+            } else {
+                // Materialise the displacement in x17 and add.
+                self.emitter.load_const64(Reg::X17, abs as u64);
+                self.emitter.sub64(xtmp, xtmp, Reg::X17);
+            }
+        }
+        0
+    }
+
+    /// Emit `ADD Xd, Xn, Xm, LSL #shift`. We hand-encode because the
+    /// emitter's typed `add64` doesn't expose the shift amount yet.
+    fn emit_add_lsl64(&mut self, rd: Reg, rn: Reg, rm: Reg, shift: u32) {
+        // sf=1, op=0, S=0, opc=01011, shift=00 (LSL), N=0
+        // imm6 = shift
+        //   = 0x8B000000 | (Rm<<16) | (shift<<10) | (Rn<<5) | Rd
+        let word = 0x8B00_0000
+            | ((rm.raw() as u32) << 16)
+            | (shift << 10)
+            | ((rn.raw() as u32) << 5)
+            | (rd.raw() as u32);
+        self.emitter.raw_word(word);
+    }
+
+    /// Lower an indirect call through a memory operand. For the e2e
+    /// path we know the IAT slot is filled before execution, so we
+    /// dereference it at run time and `BLR` to the loaded pointer.
+    ///
+    /// AAPCS64 arg-marshalling for Win64 thunks is done inline: we
+    /// move RCX (X1) into X0 so a single-argument Rust thunk sees its
+    /// argument in the standard place. Multi-arg thunks need a richer
+    /// trampoline; see `docs/jit.md`.
+    fn lift_call_indirect(&mut self, inst: &Inst) -> LifterResult<()> {
+        let target = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        // Effective address of the function pointer slot -> X16.
+        let leftover = self.addr_into_xtmp(&target, inst, Reg::X16)?;
+        // X16 = *X16  (load the function pointer from the slot).
+        self.emitter.ldr64(Reg::X16, Reg::X16, leftover);
+        // Marshal: AAPCS64 arg0 = guest RCX (which is X1 in our pinning).
+        self.emitter.mov64(Reg::X0, Reg::X1);
+        // Save host frame & link register across the call so the lifted
+        // block can still RET to its original host caller afterwards.
+        // 16-byte stack alignment is preserved by stp/ldp pre/post-index.
+        self.emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
+        // BLR X16 — sets X30 (LR) to the next host PC. AAPCS64.
+        self.emitter.blr(Reg::X16);
+        self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
+        Ok(())
+    }
+
     fn lift_mov(&mut self, inst: &Inst) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
         let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
@@ -99,6 +218,33 @@ impl<'a> Lifter<'a> {
             // mov reg, reg
             (Operand::Reg(rd, dst_size), Operand::Reg(rs, _src_size)) => {
                 self.mov_reg_reg(rd, dst_size, rs);
+                Ok(())
+            }
+            // mov reg, [mem]
+            (Operand::Reg(rd, size), src @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&src, inst, Reg::X16)?;
+                let hd = host_reg(rd);
+                match size {
+                    OpSize::B8 => self.emitter.ldr64(hd, Reg::X16, leftover),
+                    OpSize::B4 => {
+                        self.emitter.ldr32(hd, Reg::X16, leftover);
+                        // x86 32-bit dest already zero-extends; LDR Wn does this.
+                    }
+                    OpSize::B2 => self.emitter.ldrh(hd, Reg::X16, leftover),
+                    OpSize::B1 => self.emitter.ldrb(hd, Reg::X16, leftover),
+                }
+                Ok(())
+            }
+            // mov [mem], reg
+            (dst @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::Reg(rs, size)) => {
+                let leftover = self.addr_into_xtmp(&dst, inst, Reg::X16)?;
+                let hs = host_reg(rs);
+                match size {
+                    OpSize::B8 => self.emitter.str64(hs, Reg::X16, leftover),
+                    OpSize::B4 => self.emitter.str32(hs, Reg::X16, leftover),
+                    OpSize::B2 => self.emitter.strh(hs, Reg::X16, leftover),
+                    OpSize::B1 => self.emitter.strb(hs, Reg::X16, leftover),
+                }
                 Ok(())
             }
             _ => Err(LifterError::Unsupported(Op::Mov)),

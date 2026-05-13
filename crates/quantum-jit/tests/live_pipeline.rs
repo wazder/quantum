@@ -80,3 +80,68 @@ fn sub_rax_rbx_correct() {
     ];
     assert_eq!(run_returns_u64(&bytes), 42);
 }
+
+static MEM_FIXTURE: u64 = 0x1122_3344_5566_7788;
+
+#[test]
+fn mov_rax_from_memory_via_rbx() {
+    // mov rbx, &MEM_FIXTURE ; mov rax, [rbx] ; ret
+    let addr = (&MEM_FIXTURE as *const u64) as u64;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0x48, 0xBB]); // mov rbx, imm64
+    bytes.extend_from_slice(&addr.to_le_bytes());
+    bytes.extend_from_slice(&[0x48, 0x8B, 0x03]); // mov rax, [rbx]
+    bytes.push(0xC3); // ret
+    assert_eq!(run_returns_u64(&bytes), MEM_FIXTURE);
+}
+
+extern "C" fn host_double(x: u64) -> u64 {
+    x * 2
+}
+
+static mut HOST_THUNK_SLOT: u64 = 0;
+
+#[test]
+fn call_indirect_through_iat_slot() {
+    // SAFETY: written once before any concurrent reader.
+    unsafe {
+        HOST_THUNK_SLOT = host_double as *const () as u64;
+    }
+    let slot_ptr = core::ptr::addr_of!(HOST_THUNK_SLOT) as u64;
+
+    // Layout we want lifted:
+    //   mov rcx, 21          ; 7 bytes (REX.W mov r/m64, imm32 via group 11 /0)
+    //   call qword ptr [rip + 0] ; 6 bytes (target is the next instruction)
+    //   ret                  ; 1 byte
+    //
+    // For RIP-relative the decoder computes target = (call_guest_rip + call_len + disp).
+    // We arrange `guest_rip` so the resolved target lands exactly on `slot_ptr`.
+    //
+    //   call instruction starts at byte 7 within `bytes`
+    //   call has length 6 and disp=0
+    //   target = (start + 7) + 6 + 0 = start + 13
+    //   Set start = slot_ptr - 13 so target == slot_ptr.
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&[0x48, 0xC7, 0xC1, 0x15, 0x00, 0x00, 0x00]); // mov rcx, 21
+    bytes.extend_from_slice(&[0xFF, 0x15, 0x00, 0x00, 0x00, 0x00]); // call [rip + 0]
+    bytes.push(0xC3); // ret
+
+    let start_rip = slot_ptr.wrapping_sub(13);
+
+    let mut emitter = quantum_jit::emitter::Emitter::new();
+    let mut decoder = quantum_jit::decoder::Decoder::new(&bytes, start_rip);
+    while decoder.remaining() > 0 {
+        let inst = decoder.next().expect("decode");
+        quantum_jit::lifter::Lifter::new(&mut emitter)
+            .lift(&inst)
+            .expect("lift");
+    }
+    emitter.finish().expect("finish");
+
+    let host_bytes = emitter.bytes();
+    let mut cache = CodeCache::new(4096).expect("cache");
+    let p = cache.install(&host_bytes).expect("install");
+    let f: extern "C" fn() -> u64 = unsafe { core::mem::transmute(p.as_ptr()) };
+    assert_eq!(f(), 42); // host_double(21) == 42
+}
