@@ -728,6 +728,10 @@ impl<'a> Decoder<'a> {
             0x05 => Ok(make(Op::Syscall, [None, None, None], rip)),
             // 0F 0B UD2
             0x0B => Ok(make(Op::Ud2, [None, None, None], rip)),
+            // 0F 31 RDTSC
+            0x31 => Ok(make(Op::Rdtsc, [None, None, None], rip)),
+            // 0F A2 CPUID
+            0xA2 if !p.osize && !p.repe && !p.repne => Ok(make(Op::Cpuid, [None, None, None], rip)),
             // SSE2 scalar moves with size determined by REP/OSIZE prefixes.
             //   66 0F 10 /r is unused (movupd); skip for now.
             //   F2 0F 10 /r MOVSD xmm, xmm/m64
@@ -1692,6 +1696,22 @@ mod tests {
         assert_eq!(i.op, Op::Sub);
         assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rsp, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::Imm(0x28, OpSize::B1)));
+    }
+
+    #[test]
+    fn cpuid_decodes() {
+        // 0F A2 -> cpuid
+        let i = dec(&[0x0F, 0xA2]);
+        assert_eq!(i.op, Op::Cpuid);
+        assert_eq!(i.len, 2);
+    }
+
+    #[test]
+    fn rdtsc_decodes() {
+        // 0F 31 -> rdtsc
+        let i = dec(&[0x0F, 0x31]);
+        assert_eq!(i.op, Op::Rdtsc);
+        assert_eq!(i.len, 2);
     }
 
     #[test]

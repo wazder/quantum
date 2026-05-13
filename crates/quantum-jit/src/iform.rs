@@ -169,6 +169,11 @@ pub enum Op {
     Ud2,
     Hlt,
     Syscall,
+    /// 0F A2 — CPUID. Reads EAX/ECX (leaf/subleaf), writes
+    /// EAX/EBX/ECX/EDX with feature bits.
+    Cpuid,
+    /// 0F 31 — RDTSC. Reads timestamp counter into EDX:EAX.
+    Rdtsc,
     // Flag / direction
     Cld,
     Std,

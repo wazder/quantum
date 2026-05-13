@@ -143,6 +143,8 @@ impl<'a> Lifter<'a> {
             Op::SqrtScalar => self.lift_sqrt_scalar(inst),
             Op::Cmpxchg => self.lift_cmpxchg(inst),
             Op::Xadd => self.lift_xadd(inst),
+            Op::Cpuid => self.lift_cpuid(),
+            Op::Rdtsc => self.lift_rdtsc(),
             Op::Bswap => self.lift_bswap(inst),
             Op::PaddQ => self.lift_packed_arith(inst, PackedArith::AddQ),
             Op::PsubQ => self.lift_packed_arith(inst, PackedArith::SubQ),
@@ -1667,6 +1669,82 @@ impl<'a> Lifter<'a> {
         }
         self.emitter
             .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        Ok(())
+    }
+
+    /// CPUID — read EAX (and ECX for some leaves) and write EAX/EBX/ECX/EDX
+    /// with the feature/vendor info. We dispatch on a couple of leaves:
+    ///   leaf 0: max basic leaf + "GenuineIntel" vendor string
+    ///   leaf 1: family/model + feature bits (SSE2/SSE3/SSE4 advertised,
+    ///           AVX deliberately OFF since we can't lift VEX-encoded ops)
+    ///   anything else: zeros (safe default)
+    fn lift_cpuid(&mut self) -> LifterResult<()> {
+        let rax = host_reg(GpReg::Rax);
+        let rcx = host_reg(GpReg::Rcx);
+        let rdx = host_reg(GpReg::Rdx);
+        let rbx = host_reg(GpReg::Rbx);
+
+        let leaf1_label = self.emitter.make_label();
+        let zero_label = self.emitter.make_label();
+        let end_label = self.emitter.make_label();
+
+        // if RAX != 0, jump to leaf1 check.
+        self.emitter.cmp64_imm(rax, 0);
+        self.emitter.b_cond(crate::emitter::Cond::Ne, leaf1_label);
+        // Leaf 0: GenuineIntel + max basic leaf 7.
+        // u32 LE: ebx="Genu"=0x756e6547, edx="ineI"=0x49656e69, ecx="ntel"=0x6c65746e.
+        self.emitter.load_const64(rax, 7);
+        self.emitter.load_const64(rbx, 0x756e6547);
+        self.emitter.load_const64(rdx, 0x49656e69);
+        self.emitter.load_const64(rcx, 0x6c65746e);
+        self.emitter.b(end_label);
+
+        self.emitter.bind(leaf1_label);
+        self.emitter.cmp64_imm(rax, 1);
+        self.emitter.b_cond(crate::emitter::Cond::Ne, zero_label);
+        // Leaf 1: feature bits.
+        //   EAX: stepping/model/family (generic-ish value)
+        //   EBX: cache_line=8 (in bits 8-15 of brand_index format)
+        //   EDX: FPU+TSC+CMPXCHG8B+CMOV+MMX+FXSR+SSE+SSE2
+        //   ECX: SSE3+SSSE3+CMPXCHG16B+SSE4.1+SSE4.2+POPCNT
+        //   (Note: AVX bit 28 in ECX is OFF — we don't lift VEX ops.)
+        self.emitter.load_const64(rax, 0x0001_06A9);
+        self.emitter.load_const64(rbx, 0x0001_0800);
+        self.emitter.load_const64(rcx, 0x0098_2201);
+        self.emitter.load_const64(rdx, 0x0780_8111);
+        self.emitter.b(end_label);
+
+        self.emitter.bind(zero_label);
+        // Default zeros (covers extended leaves 0x80000000+, leaf 7, etc).
+        self.emitter.movz64(rax, 0, 0);
+        self.emitter.movz64(rbx, 0, 0);
+        self.emitter.movz64(rcx, 0, 0);
+        self.emitter.movz64(rdx, 0, 0);
+
+        self.emitter.bind(end_label);
+        Ok(())
+    }
+
+    /// RDTSC — read 64-bit virtual counter, split across EDX:EAX.
+    /// Sources the AArch64 CNTVCT_EL0 counter via MRS. Frequency differs
+    /// from x86 TSC, but delta measurements are valid which is what most
+    /// frame-time / profiling code uses it for.
+    fn lift_rdtsc(&mut self) -> LifterResult<()> {
+        let rax = host_reg(GpReg::Rax);
+        let rdx = host_reg(GpReg::Rdx);
+        // MRS Xrax, CNTVCT_EL0 — system register read.
+        // Encoding: 1101_0101_0011_1011_1110_0000_010_Rd_0
+        // = 0xD53BE040 | Rd
+        self.emitter.raw_word(0xD53B_E040 | (rax.raw() as u32));
+        // RDX = RAX >> 32. UBFM Xd, Xn, #32, #63 (alias LSR).
+        let ubfm = 0xD340_0000
+            | (32u32 << 16)
+            | (63u32 << 10)
+            | ((rax.raw() as u32) << 5)
+            | (rdx.raw() as u32);
+        self.emitter.raw_word(ubfm);
+        // Mask RAX to low 32 (clears upper).
+        self.emit_and_imm_lo32(rax, rax);
         Ok(())
     }
 
