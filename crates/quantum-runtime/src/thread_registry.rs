@@ -8,7 +8,7 @@
 
 use alloc::boxed::Box;
 use core::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// A "thread-finished" flag — the kernel32 WaitForSingleObject thunk
 /// polls it. Spawned threads set it true on exit.
@@ -24,18 +24,27 @@ pub trait ThreadSpawner: Send + Sync {
     fn spawn(&self, start_rip: u64, param: u64) -> Option<ThreadFinished>;
 }
 
-static SPAWNER: OnceLock<Box<dyn ThreadSpawner>> = OnceLock::new();
+fn slot() -> &'static Mutex<Option<Arc<dyn ThreadSpawner>>> {
+    static SLOT: OnceLock<Mutex<Option<Arc<dyn ThreadSpawner>>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
 
-/// Install the process-wide ThreadSpawner. Called once by the driver
-/// before guest code runs. Subsequent calls are ignored.
+/// Install the process-wide ThreadSpawner. Production drivers call
+/// this exactly once before guest code runs; calling again replaces
+/// the previous spawner (useful in tests that need to set up a fresh
+/// fixture per case).
 pub fn register(spawner: Box<dyn ThreadSpawner>) {
-    let _ = SPAWNER.set(spawner);
+    let arc: Arc<dyn ThreadSpawner> = Arc::from(spawner);
+    *slot().lock().unwrap() = Some(arc);
 }
 
 /// Reach into the registered spawner. Returns None if no driver has
 /// registered one (e.g. unit tests that don't exercise threading).
 pub fn spawn(start_rip: u64, param: u64) -> Option<ThreadFinished> {
-    SPAWNER.get()?.spawn(start_rip, param)
+    // Clone the Arc and drop the lock before calling the spawner so a
+    // spawner that itself takes locks can't deadlock with `register`.
+    let s = slot().lock().unwrap().clone()?;
+    s.spawn(start_rip, param)
 }
 
 #[cfg(test)]

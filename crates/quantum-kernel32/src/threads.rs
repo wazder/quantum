@@ -384,11 +384,22 @@ mod tests {
         assert_eq!(CloseHandle(h), 1);
     }
 
+    /// Serialise the two CreateThread tests below — both register a
+    /// process-wide `ThreadSpawner`, so they can't run in parallel.
+    fn spawner_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::OnceLock;
+        static M: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        M.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn create_thread_routes_through_registry() {
         use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::Arc;
 
+        let _guard = spawner_test_lock();
         static GOT_RIP: AtomicU64 = AtomicU64::new(0);
         static GOT_PARAM: AtomicU64 = AtomicU64::new(0);
 
@@ -401,12 +412,12 @@ mod tests {
             ) -> Option<quantum_runtime::ThreadFinished> {
                 GOT_RIP.store(start_rip, Ordering::SeqCst);
                 GOT_PARAM.store(param, Ordering::SeqCst);
-                // Return an already-finished flag so WaitForSingleObject
-                // returns immediately without us actually spawning.
                 Some(Arc::new(AtomicBool::new(true)))
             }
         }
 
+        GOT_RIP.store(0, Ordering::SeqCst);
+        GOT_PARAM.store(0, Ordering::SeqCst);
         quantum_runtime::thread_registry::register(Box::new(TestSpawner));
 
         let h = CreateThread(
@@ -420,8 +431,55 @@ mod tests {
         assert!(h >= 0x1000);
         assert_eq!(GOT_RIP.load(Ordering::SeqCst), 0xCAFE_BABE);
         assert_eq!(GOT_PARAM.load(Ordering::SeqCst), 0xDEAD_BEEF);
-        // Pre-signalled flag, wait succeeds immediately.
         assert_eq!(WaitForSingleObject(h, 100), WAIT_OBJECT_0);
+        assert_eq!(CloseHandle(h), 1);
+    }
+
+    /// Drive the full handle → spawn → pthread → wait round trip with
+    /// a spawner that actually spins up a `std::thread`. Verifies
+    /// `WaitForSingleObject` blocks until the worker sets the flag.
+    #[test]
+    fn create_thread_real_worker_round_trip() {
+        use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        let _guard = spawner_test_lock();
+        static WORKER_RAN: AtomicU32 = AtomicU32::new(0);
+
+        struct RealSpawner;
+        impl quantum_runtime::ThreadSpawner for RealSpawner {
+            fn spawn(
+                &self,
+                _start_rip: u64,
+                _param: u64,
+            ) -> Option<quantum_runtime::ThreadFinished> {
+                let finished: quantum_runtime::ThreadFinished =
+                    Arc::new(AtomicBool::new(false));
+                let f2 = Arc::clone(&finished);
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                    WORKER_RAN.fetch_add(1, Ordering::SeqCst);
+                    f2.store(true, Ordering::SeqCst);
+                });
+                Some(finished)
+            }
+        }
+
+        let before = WORKER_RAN.load(Ordering::SeqCst);
+        quantum_runtime::thread_registry::register(Box::new(RealSpawner));
+
+        let h = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            0xAAAA as *const c_void,
+            0xBBBB as *mut c_void,
+            0,
+            core::ptr::null_mut(),
+        );
+        // Should not be signalled before the worker's sleep completes.
+        assert_eq!(WaitForSingleObject(h, 0), WAIT_TIMEOUT);
+        assert_eq!(WaitForSingleObject(h, 5_000), WAIT_OBJECT_0);
+        assert!(WORKER_RAN.load(Ordering::SeqCst) > before);
         assert_eq!(CloseHandle(h), 1);
     }
 
