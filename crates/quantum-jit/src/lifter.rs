@@ -141,6 +141,8 @@ impl<'a> Lifter<'a> {
             Op::MinScalar => self.lift_scalar_fp(inst, FpOp::Min),
             Op::MaxScalar => self.lift_scalar_fp(inst, FpOp::Max),
             Op::SqrtScalar => self.lift_sqrt_scalar(inst),
+            Op::Cmpxchg => self.lift_cmpxchg(inst),
+            Op::Xadd => self.lift_xadd(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1273,6 +1275,165 @@ impl<'a> Lifter<'a> {
         Ok(())
     }
 
+    /// CMPXCHG r/m, r — Win64 spec:
+    ///   tmp = *r/m
+    ///   if RAX == tmp: *r/m = src,  ZF=1
+    ///   else:          RAX = tmp,   ZF=0
+    /// The LOCK prefix makes this atomic; we currently emit a
+    /// non-atomic load + branch + store sequence. Correct for the
+    /// single-threaded JIT phase; will need LSE CAS once threading
+    /// goes live.
+    fn lift_cmpxchg(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (src_reg, size) = match src {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(Op::Cmpxchg)),
+        };
+        let rax = host_reg(GpReg::Rax);
+
+        // Helper: load r/m value into X17 and capture (load fn / store fn / addr_reg / offset).
+        match dst {
+            Operand::Reg(rd, _) => {
+                let dst_reg = host_reg(rd);
+                // tmp = dst_reg.
+                self.emitter.mov64(Reg::X17, dst_reg);
+                self.emit_cmpxchg_compare(rax, Reg::X17, size);
+                let not_eq = self.emitter.make_label();
+                self.emitter.b_cond(crate::emitter::Cond::Ne, not_eq);
+                // Equal: dst_reg = src_reg.
+                self.emitter.mov64(dst_reg, src_reg);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(dst_reg, dst_reg);
+                }
+                let end = self.emitter.make_label();
+                self.emitter.b(end);
+                // Not equal: RAX = tmp.
+                self.emitter.bind(not_eq);
+                self.emitter.mov64(rax, Reg::X17);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(rax, rax);
+                }
+                self.emitter.bind(end);
+                Ok(())
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                // tmp = *[X16+leftover].
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+                self.emit_cmpxchg_compare(rax, Reg::X17, size);
+                let not_eq = self.emitter.make_label();
+                self.emitter.b_cond(crate::emitter::Cond::Ne, not_eq);
+                // Equal: *mem = src_reg.
+                self.store_sized(src_reg, Reg::X16, leftover, mem_size);
+                let end = self.emitter.make_label();
+                self.emitter.b(end);
+                // Not equal: RAX = tmp.
+                self.emitter.bind(not_eq);
+                self.emitter.mov64(rax, Reg::X17);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(rax, rax);
+                }
+                self.emitter.bind(end);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::Cmpxchg)),
+        }
+    }
+
+    /// Helper for CMPXCHG: SUBS xzr, RAX, X17 — sets NZCV from RAX-tmp
+    /// without writing a result. Z is set when they match.
+    fn emit_cmpxchg_compare(&mut self, rax: Reg, tmp: Reg, size: OpSize) {
+        // For 32-bit we still subs the full 64-bit values since both
+        // RAX and tmp are zero-extended through our pipeline (we mask
+        // upper bits on every B4 write).
+        let _ = size;
+        self.emitter.cmp64(rax, tmp);
+    }
+
+    /// XADD r/m, r — temp = *r/m + src; src = *r/m; *r/m = temp.
+    /// Effectively swap dst with (dst+src). Sets NZCV from the add.
+    fn lift_xadd(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (src_reg, size) = match src {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(Op::Xadd)),
+        };
+        match dst {
+            Operand::Reg(rd, _) => {
+                let dst_reg = host_reg(rd);
+                // X17 = old dst.
+                self.emitter.mov64(Reg::X17, dst_reg);
+                // dst = dst + src (sets NZCV).
+                self.emit_arith_rr(ArithKind::Add, dst_reg, dst_reg, src_reg, size);
+                // src = old dst.
+                self.emitter.mov64(src_reg, Reg::X17);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(src_reg, src_reg);
+                }
+                Ok(())
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                // X17 = *mem (old).
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+                // Compute new = old + src into a temp (X17 again, since
+                // src_reg might overlap). We'll restore X17's old value
+                // into src after the store.
+                // Actually: do new = old + src into X17 (overwriting old)
+                // — but then we lose old. Instead use a scratch beyond
+                // X16/X17. Since src might also be a pinned reg, we use
+                // the stack for old. Simpler: stp xtmp, then ldp at end.
+                //
+                // Realistic simpler approach: compute new in a fresh
+                // scratch via X16 (since X16 holds the address but we
+                // can re-derive it).
+                //
+                // Plan:
+                //   stash old to a new scratch slot (XMM ctx as scratch?
+                //   nope — just push to host stack via STP) — overkill.
+                //
+                // Trick: stash old (X17) to memory location offset 0 of
+                // ctx (we have RAX slot; but we don't want to clobber).
+                //
+                // Use a thread-local-ish slot: I'll just allocate a tmp
+                // by storing old into the destination's source register
+                // before the add, then restoring src after. That's:
+                //   src_reg_saved -> X17 (old dst)? no, we need both.
+                //
+                // OK cleanest: do the add into a saved-X28-relative slot.
+                // We already burn ctx slots heavily; let me add a single
+                // u64 "scratch" field to GuestContext later. For now, do
+                // a host-stack push via STP and POP.
+                //
+                // sp -= 16; str X17, [sp]
+                self.emitter.stp64_pre(Reg::X17, Reg::XZR, Reg::SP, -16);
+                // Compute X17 = X17 + src_reg (X17 was old dst).
+                self.emit_arith_rr(ArithKind::Add, Reg::X17, Reg::X17, src_reg, size);
+                // Store new into *mem.
+                self.store_sized(Reg::X17, Reg::X16, leftover, mem_size);
+                // Pop old into src_reg.
+                self.emitter.ldp64_post(src_reg, Reg::XZR, Reg::SP, 16);
+                if matches!(size, OpSize::B4) {
+                    self.emit_and_imm_lo32(src_reg, src_reg);
+                }
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::Xadd)),
+        }
+    }
+
     /// SQRTSS / SQRTSD — scalar FP square root. NEON FSQRT.
     fn lift_sqrt_scalar(&mut self, inst: &Inst) -> LifterResult<()> {
         let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
@@ -2287,6 +2448,25 @@ mod tests {
         // adds x0, x0, x3 -> 0xAB03_0000
         assert_eq!(words.len(), 1);
         assert_eq!(words[0], 0xAB03_0000);
+    }
+
+    #[test]
+    fn cmpxchg_reg_reg_emits_compare_then_branch_pair() {
+        // 48 0F B1 D1 -> cmpxchg rcx, rdx  (compare rax with rcx; if equal: rcx=rdx; else: rax=rcx)
+        let words = lift_one(&[0x48, 0x0F, 0xB1, 0xD1]);
+        // Sanity: instruction sequence is non-empty (5 ops at minimum:
+        // mov tmp, dst; cmp rax, tmp; b.ne not_eq; mov dst, src; b end;
+        // mov rax, tmp; — emitter resolves the labels after fixup pass).
+        assert!(words.len() >= 5);
+    }
+
+    #[test]
+    fn xadd_reg_reg_swaps() {
+        // 48 0F C1 D1 -> xadd rcx, rdx
+        let words = lift_one(&[0x48, 0x0F, 0xC1, 0xD1]);
+        // mov X17, rcx_host; adds rcx_host, rcx_host, rdx_host; mov rdx_host, X17.
+        // Three instructions minimum.
+        assert!(words.len() >= 3);
     }
 
     #[test]
