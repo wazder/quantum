@@ -11,6 +11,7 @@ pub mod io;
 pub mod process;
 pub mod thunks;
 pub mod time;
+pub mod vm;
 
 pub use heap::{GetProcessHeap, HeapAlloc, HeapFree};
 pub use process::{ExitProcess, ProcessExit};
@@ -19,3 +20,4 @@ pub use time::{
     GetCurrentProcessId, GetCurrentThreadId, GetSystemTimeAsFileTime, GetTickCount, GetTickCount64,
     QueryPerformanceCounter, QueryPerformanceFrequency, Sleep,
 };
+pub use vm::{VirtualAlloc, VirtualFree, VirtualProtect};

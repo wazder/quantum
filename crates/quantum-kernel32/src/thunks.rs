@@ -27,6 +27,9 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
         "GetSystemTimeAsFileTime" => crate::time::GetSystemTimeAsFileTime as *const (),
         "GetCurrentThreadId" => crate::time::GetCurrentThreadId as *const (),
         "GetCurrentProcessId" => crate::time::GetCurrentProcessId as *const (),
+        "VirtualAlloc" => crate::vm::VirtualAlloc as *const (),
+        "VirtualFree" => crate::vm::VirtualFree as *const (),
+        "VirtualProtect" => crate::vm::VirtualProtect as *const (),
         _ => return None,
     };
     Some(ptr as u64)
