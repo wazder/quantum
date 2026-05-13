@@ -523,19 +523,13 @@ impl Emitter {
 
     /// UMULH Rd, Rn, Rm — high 64 bits of unsigned 64x64.
     pub fn umulh64(&mut self, rd: Reg, rn: Reg, rm: Reg) {
-        let w = 0x9BC0_7C00
-            | ((rm.0 as u32) << 16)
-            | ((rn.0 as u32) << 5)
-            | (rd.0 as u32);
+        let w = 0x9BC0_7C00 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | (rd.0 as u32);
         self.push(w);
     }
 
     /// SMULH Rd, Rn, Rm — high 64 bits of signed 64x64.
     pub fn smulh64(&mut self, rd: Reg, rn: Reg, rm: Reg) {
-        let w = 0x9B40_7C00
-            | ((rm.0 as u32) << 16)
-            | ((rn.0 as u32) << 5)
-            | (rd.0 as u32);
+        let w = 0x9B40_7C00 | ((rm.0 as u32) << 16) | ((rn.0 as u32) << 5) | (rd.0 as u32);
         self.push(w);
     }
 }

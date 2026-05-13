@@ -152,11 +152,7 @@ const SIGTRAP: i32 = 5;
 const SIGILL: i32 = 4;
 
 unsafe extern "C" {
-    fn sigaction(
-        sig: i32,
-        act: *const DarwinSigAction,
-        oldact: *mut DarwinSigAction,
-    ) -> i32;
+    fn sigaction(sig: i32, act: *const DarwinSigAction, oldact: *mut DarwinSigAction) -> i32;
     fn _exit(status: i32) -> !;
 }
 
@@ -185,11 +181,7 @@ unsafe fn pc_from_ucontext(ucontext: *mut core::ffi::c_void) -> u64 {
     }
 }
 
-extern "C" fn crash_handler(
-    sig: i32,
-    info: *mut DarwinSigInfo,
-    ucontext: *mut core::ffi::c_void,
-) {
+extern "C" fn crash_handler(sig: i32, info: *mut DarwinSigInfo, ucontext: *mut core::ffi::c_void) {
     let fault_addr = if info.is_null() {
         0
     } else {

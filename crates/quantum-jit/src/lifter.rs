@@ -163,7 +163,12 @@ impl<'a> Lifter<'a> {
     /// For `RipRel(disp, size)` the effective guest address is fixed at
     /// translate time: `inst.guest_rip + inst.len + disp`. We embed it
     /// as a 64-bit immediate via `load_const64`.
-    pub(crate) fn addr_into_xtmp(&mut self, op: &Operand, inst: &Inst, xtmp: Reg) -> LifterResult<u32> {
+    pub(crate) fn addr_into_xtmp(
+        &mut self,
+        op: &Operand,
+        inst: &Inst,
+        xtmp: Reg,
+    ) -> LifterResult<u32> {
         match *op {
             Operand::Mem(m) => Ok(self.mem_address_into(m, xtmp)),
             Operand::RipRel(disp, _) => {
@@ -630,9 +635,7 @@ impl<'a> Lifter<'a> {
                     // sign-extend instead.
                     // SXTW Xd, Wn -> SBFM Xd, Xn, #0, #31.
                     let sxtw = |dst: Reg, src: Reg| -> u32 {
-                        0x9340_7C00
-                            | ((src.raw() as u32) << 5)
-                            | (dst.raw() as u32)
+                        0x9340_7C00 | ((src.raw() as u32) << 5) | (dst.raw() as u32)
                     };
                     self.emitter.raw_word(sxtw(Reg::X16, rax));
                     // Re-pack dividend properly for signed: high half
@@ -672,9 +675,7 @@ impl<'a> Lifter<'a> {
                 let signed = matches!(kind, DivMulKind::Imul1);
                 if signed {
                     let sxtw = |dst: Reg, src: Reg| -> u32 {
-                        0x9340_7C00
-                            | ((src.raw() as u32) << 5)
-                            | (dst.raw() as u32)
+                        0x9340_7C00 | ((src.raw() as u32) << 5) | (dst.raw() as u32)
                     };
                     self.emitter.raw_word(sxtw(Reg::X16, rax));
                     self.emitter.raw_word(sxtw(Reg::X17, divisor));
@@ -737,7 +738,8 @@ impl<'a> Lifter<'a> {
         match dst {
             Operand::Reg(rd, size) => {
                 let hd = host_reg(rd);
-                let w = 0xEB00_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
+                let w =
+                    0xEB00_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
                 self.emitter.raw_word(w);
                 if matches!(size, OpSize::B4) {
                     self.emit_and_imm_lo32(hd, hd);
@@ -770,7 +772,8 @@ impl<'a> Lifter<'a> {
         match dst {
             Operand::Reg(rd, size) => {
                 let hd = host_reg(rd);
-                let w = 0xAA20_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
+                let w =
+                    0xAA20_0000 | ((hd.raw() as u32) << 16) | ((31u32) << 5) | (hd.raw() as u32);
                 self.emitter.raw_word(w);
                 if matches!(size, OpSize::B4) {
                     self.emit_and_imm_lo32(hd, hd);
@@ -919,7 +922,8 @@ impl<'a> Lifter<'a> {
                     // X16 = (width - rcx) & mask.
                     let width = if matches!(size, OpSize::B8) { 64 } else { 32 };
                     self.emitter.movz64(Reg::X16, width as u16, 0);
-                    self.emitter.subs64(Reg::X16, Reg::X16, host_reg(GpReg::Rcx));
+                    self.emitter
+                        .subs64(Reg::X16, Reg::X16, host_reg(GpReg::Rcx));
                     Reg::X16
                 } else {
                     host_reg(GpReg::Rcx)

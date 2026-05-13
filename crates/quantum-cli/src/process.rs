@@ -65,9 +65,7 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
     if trace {
         eprintln!(
             "[trace] PE: entry={:#x} base={:#x} sections={}",
-            pe.opt.address_of_entry_point,
-            pe.opt.image_base,
-            pe.coff.number_of_sections,
+            pe.opt.address_of_entry_point, pe.opt.image_base, pe.coff.number_of_sections,
         );
     }
     let mem = MachVmManager::new();
@@ -75,8 +73,7 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
     if trace {
         eprintln!(
             "[trace] mapped at {:#x} (size {:#x})",
-            image.actual_base,
-            image.size_of_image,
+            image.actual_base, image.size_of_image,
         );
     }
     apply_relocations(&mut image).map_err(RunError::Reloc)?;
