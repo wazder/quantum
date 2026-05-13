@@ -39,6 +39,12 @@ pub enum KernelObject {
     },
     /// `HOSTFD(i32)` — wrapper for a POSIX file descriptor we opened.
     File(i32),
+    /// Real guest thread spawned via `CreateThread`. The flag is set
+    /// `true` by the host worker when the guest dispatcher loop exits.
+    /// `WaitForSingleObject` polls it.
+    Thread {
+        finished: quantum_runtime::ThreadFinished,
+    },
     /// Pseudo-handle for the current process.
     CurrentProcess,
     /// Pseudo-handle for the current thread.
@@ -227,7 +233,25 @@ pub fn wait_single(obj: &KernelObject, timeout_ms: u32) -> u32 {
             *c -= 1;
             WAIT_OBJECT_0
         }
-        // Process/Thread/File pseudo-handles: never signal here.
+        KernelObject::Thread { finished } => {
+            use core::sync::atomic::Ordering;
+            // Poll the finished flag at 1ms granularity until set or
+            // deadline. Coarse but matches our event/semaphore loops
+            // and gives the OS scheduler a chance to actually run the
+            // guest worker.
+            loop {
+                if finished.load(Ordering::SeqCst) {
+                    return WAIT_OBJECT_0;
+                }
+                if let Some(d) = deadline {
+                    if std::time::Instant::now() >= d {
+                        return WAIT_TIMEOUT;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        // Process/File pseudo-handles: never signal here.
         _ => WAIT_TIMEOUT,
     }
 }

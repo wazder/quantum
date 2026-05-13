@@ -270,34 +270,54 @@ pub extern "C" fn DuplicateHandle(
     1
 }
 
-// ---------- CreateThread placeholder ----------
+// ---------- CreateThread ----------
 //
-// Real CreateThread needs a per-thread guest context + dispatcher
-// loop running in a pthread. Until that lands we return a non-null
-// handle and call the guest entry inline on the current thread —
-// works for any program whose threads aren't load-bearing for
-// liveness.
+// A real spawn. The driver (quantum-cli) registers a ThreadSpawner
+// in `quantum_runtime::thread_registry` before guest code runs; the
+// spawner holds an `Arc<Dispatcher>` + `Arc<LoadedImage>` and knows
+// how to launch a pthread that runs the dispatcher loop with a fresh
+// `GuestContext` whose RIP is the guest start address and whose RCX
+// is the supplied parameter.
+//
+// If no spawner is registered (unit tests, or guests that touch
+// CreateThread before the driver wires it up), we fall back to the
+// old stub: return a Thread handle with finished=true so anyone
+// waiting on it succeeds immediately. That's wrong for any guest that
+// actually needs the side-effect, but the only alternative — silently
+// hanging WaitForSingle — is worse.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn CreateThread(
     _sec: *mut c_void,
     _stack_size: usize,
-    _start: *const c_void,
-    _param: *mut c_void,
+    start: *const c_void,
+    param: *mut c_void,
     _flags: u32,
     thread_id_out: *mut u32,
 ) -> usize {
-    // Stub: return a fake handle and a fake tid. The thread doesn't
-    // actually start — guest code that depends on the thread doing
-    // anything will hang waiting on it. To be replaced with a real
-    // pthread + dispatcher loop.
+    use core::sync::atomic::{AtomicU32, Ordering};
+    static NEXT_TID: AtomicU32 = AtomicU32::new(0x1000);
+    let tid = NEXT_TID.fetch_add(1, Ordering::Relaxed);
     if !thread_id_out.is_null() {
         // SAFETY: caller pointer.
         unsafe {
-            *thread_id_out = 0xDEAD_BEEF;
+            *thread_id_out = tid;
         }
     }
-    handles::insert(KernelObject::CurrentThread)
+
+    let start_rip = start as u64;
+    let param_val = param as u64;
+
+    let finished = match quantum_runtime::thread_registry::spawn(start_rip, param_val) {
+        Some(f) => f,
+        None => {
+            // No spawner registered. Hand back a pre-signalled flag
+            // so callers don't deadlock — but the work didn't run.
+            std::sync::Arc::new(core::sync::atomic::AtomicBool::new(true))
+        }
+    };
+
+    handles::insert(KernelObject::Thread { finished })
 }
 
 #[unsafe(no_mangle)]
@@ -313,8 +333,20 @@ pub extern "C" fn GetCurrentProcess() -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ExitThread(_code: u32) -> ! {
-    loop {
-        std::thread::park();
+    // If this thread armed an exit trap (worker bootstrap does), longjmp
+    // back to it so the dispatcher loop terminates cleanly and the
+    // worker's `finished` flag gets set in the bootstrap's epilogue.
+    // Otherwise fall through to pthread_exit.
+    let st_env = crate::process::exit_env_ptr();
+    let armed = crate::process::exit_armed().load(core::sync::atomic::Ordering::SeqCst);
+    if armed != 0 {
+        crate::process::longjmp(st_env, 3);
+    }
+    unsafe extern "C" {
+        fn pthread_exit(value_ptr: *mut core::ffi::c_void) -> !;
+    }
+    unsafe {
+        pthread_exit(core::ptr::null_mut());
     }
 }
 
@@ -349,6 +381,47 @@ mod tests {
         assert_eq!(ReleaseMutex(h), 1);
         // Now unowned — releasing again should fail.
         assert_eq!(ReleaseMutex(h), 0);
+        assert_eq!(CloseHandle(h), 1);
+    }
+
+    #[test]
+    fn create_thread_routes_through_registry() {
+        use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        static GOT_RIP: AtomicU64 = AtomicU64::new(0);
+        static GOT_PARAM: AtomicU64 = AtomicU64::new(0);
+
+        struct TestSpawner;
+        impl quantum_runtime::ThreadSpawner for TestSpawner {
+            fn spawn(
+                &self,
+                start_rip: u64,
+                param: u64,
+            ) -> Option<quantum_runtime::ThreadFinished> {
+                GOT_RIP.store(start_rip, Ordering::SeqCst);
+                GOT_PARAM.store(param, Ordering::SeqCst);
+                // Return an already-finished flag so WaitForSingleObject
+                // returns immediately without us actually spawning.
+                Some(Arc::new(AtomicBool::new(true)))
+            }
+        }
+
+        quantum_runtime::thread_registry::register(Box::new(TestSpawner));
+
+        let h = CreateThread(
+            core::ptr::null_mut(),
+            0,
+            0xCAFE_BABE as *const c_void,
+            0xDEAD_BEEF as *mut c_void,
+            0,
+            core::ptr::null_mut(),
+        );
+        assert!(h >= 0x1000);
+        assert_eq!(GOT_RIP.load(Ordering::SeqCst), 0xCAFE_BABE);
+        assert_eq!(GOT_PARAM.load(Ordering::SeqCst), 0xDEAD_BEEF);
+        // Pre-signalled flag, wait succeeds immediately.
+        assert_eq!(WaitForSingleObject(h, 100), WAIT_OBJECT_0);
         assert_eq!(CloseHandle(h), 1);
     }
 

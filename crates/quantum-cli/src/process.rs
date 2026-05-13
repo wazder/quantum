@@ -24,8 +24,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static LAST_ENTERED_RIP: AtomicU64 = AtomicU64::new(0);
 use quantum_loader::{LoadedImage, PeFile, apply_relocations, imports, load};
 use quantum_runtime::{
-    Dispatcher, GuestContext, GuestStack, MachVmManager, STOP_SENTINEL, invoke_block_with_ctx,
+    Dispatcher, GuestContext, GuestStack, MachVmManager, STOP_SENTINEL, ThreadFinished,
+    ThreadSpawner, invoke_block_with_ctx,
 };
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 /// Reasons a quantum run can fail before guest code ever executes.
 #[derive(Debug)]
@@ -246,6 +249,54 @@ fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, 
     }
 }
 
+/// `ThreadSpawner` implementation that drives the same dispatcher /
+/// image as the main thread. Cloned `Arc`s keep both alive for as long
+/// as any worker thread is still running guest code.
+struct CliThreadSpawner {
+    dispatcher: Arc<Dispatcher>,
+    image: Arc<LoadedImage>,
+}
+
+impl ThreadSpawner for CliThreadSpawner {
+    fn spawn(&self, start_rip: u64, param: u64) -> Option<ThreadFinished> {
+        let finished: ThreadFinished = Arc::new(AtomicBool::new(false));
+        let finished_for_worker = Arc::clone(&finished);
+        let disp = Arc::clone(&self.dispatcher);
+        let image = Arc::clone(&self.image);
+
+        let spawn_result = std::thread::Builder::new()
+            .name(format!("quantum-guest-{start_rip:#x}"))
+            .spawn(move || {
+                // Each worker owns its own guest stack and context. We
+                // wrap the dispatcher loop in `run_with_exit_trap` so
+                // ExitThread (longjmp) and crashes resolve to this
+                // thread's setjmp slot — not the main thread's.
+                let stack = match GuestStack::default_size() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        finished_for_worker
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                };
+                let mut ctx = GuestContext::default();
+                ctx.gprs[1] = param; // RCX = lpParameter (Win64 arg0)
+                ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
+
+                let _ = run_with_exit_trap(|| {
+                    let _ = run_dispatcher_loop(&disp, &image, &mut ctx, start_rip);
+                });
+
+                finished_for_worker.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+
+        match spawn_result {
+            Ok(_) => Some(finished),
+            Err(_) => None,
+        }
+    }
+}
+
 /// True if `resolve()` in quantum-kernel32 recognises this DLL — i.e.
 /// we have a built-in stub set and shouldn't try to side-load it.
 fn has_builtin(dll: &str) -> bool {
@@ -378,7 +429,20 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
     let mut ctx = GuestContext::default();
     ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
 
-    let disp = Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?;
+    let disp = Arc::new(Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?);
+    // Image won't be mutated past this point — wrap in Arc so worker
+    // threads spawned via CreateThread can read it concurrently.
+    let image = Arc::new(image);
+
+    // Register a ThreadSpawner so guest CreateThread can launch real
+    // worker pthreads that run the dispatcher loop against this same
+    // image + dispatcher. Once registered the static lives forever, so
+    // we deliberately keep the Arc clones owned by the spawner.
+    quantum_runtime::thread_registry::register(Box::new(CliThreadSpawner {
+        dispatcher: Arc::clone(&disp),
+        image: Arc::clone(&image),
+    }));
+
     let entry_va = image.actual_base + image.entry_rva as u64;
     if trace {
         eprintln!("[trace] entering JIT at {entry_va:#x}");

@@ -74,6 +74,16 @@ pub struct LoadedImage {
     pub data_directories: [DataDirectory; 16],
 }
 
+// SAFETY: LoadedImage wraps a `Region` whose `*mut u8` is the base of a
+// VM mapping owned for the lifetime of the image. After construction the
+// only mutators are `rva_to_slice_mut` and `apply_relocations`/IAT-wire,
+// all of which take `&mut self` and run synchronously on the main thread
+// before any worker thread is spawned. Once a worker thread holds an
+// `Arc<LoadedImage>`, only `&self` methods are reachable, so concurrent
+// access is to *immutable* mapped memory. That's safe to share.
+unsafe impl Send for LoadedImage {}
+unsafe impl Sync for LoadedImage {}
+
 impl LoadedImage {
     pub fn base(&self) -> *mut u8 {
         self.region.base()

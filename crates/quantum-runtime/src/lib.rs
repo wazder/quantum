@@ -20,6 +20,7 @@ pub mod mem;
 pub mod peb;
 pub mod sys;
 pub mod thread;
+pub mod thread_registry;
 
 pub use codecache::CodeCache;
 pub use dispatcher::{
@@ -29,3 +30,4 @@ pub use fd::{HostFd, OpenFlags, StdStream};
 pub use guest_stack::{DEFAULT_GUEST_STACK_SIZE, GuestStack};
 pub use mem::{MachVmManager, MemoryManager, Protection, Region};
 pub use peb::ProcessControlBlock;
+pub use thread_registry::{ThreadFinished, ThreadSpawner};

@@ -45,16 +45,101 @@ unsafe extern "C" {
     pub safe fn longjmp(env: *mut core::ffi::c_void, val: i32) -> !;
 }
 
-/// Single-process global ExitProcess sink.
-///
-/// Tests install the `ExitTrap` once before invoking JIT'd code. When
-/// `ExitProcess` is called from JIT, it writes the exit code into
-/// `EXIT_CODE` and longjmps back through `EXIT_ENV`.
-pub static EXIT_ENV: JmpBuf = JmpBuf::new();
-pub static EXIT_CODE: AtomicU32 = AtomicU32::new(0);
-/// Set to 1 once `arm_exit_trap` has called `setjmp`. A guest that
-/// calls ExitProcess without an armed trap is treated as a hard abort.
-pub static EXIT_ARMED: AtomicU32 = AtomicU32::new(0);
+/// Per-thread ExitProcess / crash sink. Each guest thread (main +
+/// CreateThread-spawned workers) has its own `ExitState` reachable via
+/// a pthread key, so longjmp from a worker's signal handler lands in
+/// that worker's setjmp slot — not back into the main thread's frame.
+#[repr(C, align(16))]
+pub struct ExitState {
+    pub env: JmpBuf,
+    pub code: AtomicU32,
+    pub armed: AtomicU32,
+}
+
+unsafe impl Sync for ExitState {}
+
+impl ExitState {
+    pub const fn new() -> Self {
+        Self {
+            env: JmpBuf::new(),
+            code: AtomicU32::new(0),
+            armed: AtomicU32::new(0),
+        }
+    }
+}
+
+impl Default for ExitState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// pthread-key handle for `ExitState`. Initialised lazily on first
+/// access; -1 means "not yet initialised".
+static EXIT_KEY: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+
+unsafe extern "C" {
+    fn pthread_key_create(key: *mut u32, destructor: *const ()) -> i32;
+    fn pthread_getspecific(key: u32) -> *mut core::ffi::c_void;
+    fn pthread_setspecific(key: u32, val: *const core::ffi::c_void) -> i32;
+}
+
+/// One-time creation of the pthread key. We deliberately leak the key
+/// for the lifetime of the process — pthread keys are a small global
+/// resource. The destructor is null because each thread's box is owned
+/// by the runtime and shouldn't be auto-freed when the thread exits;
+/// any cleanup happens explicitly in the worker bootstrap.
+fn ensure_exit_key() -> u32 {
+    let cur = EXIT_KEY.load(Ordering::SeqCst);
+    if cur >= 0 {
+        return cur as u32;
+    }
+    let mut k: u32 = 0;
+    // SAFETY: writes into our local stack u32.
+    unsafe {
+        pthread_key_create(&mut k, core::ptr::null());
+    }
+    match EXIT_KEY.compare_exchange(-1, k as i32, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => k,
+        // A racing thread already installed a key. We leak `k` (small)
+        // and use the winner's value.
+        Err(existing) => existing as u32,
+    }
+}
+
+/// Get this thread's `ExitState`, allocating one on first access.
+/// Returned pointer is stable for the life of the thread.
+fn current_exit_state() -> &'static ExitState {
+    let key = ensure_exit_key();
+    // SAFETY: pthread_{get,set}specific are async-signal-safe (get is
+    // mandated by POSIX; set is technically not, but we never call it
+    // from signal context — only from this allocator).
+    unsafe {
+        let p = pthread_getspecific(key) as *mut ExitState;
+        if !p.is_null() {
+            return &*p;
+        }
+        let boxed = Box::into_raw(Box::new(ExitState::new()));
+        pthread_setspecific(key, boxed as *const _);
+        &*boxed
+    }
+}
+
+/// Compat accessor for callers that used the old global `EXIT_ENV`.
+/// Returns this thread's setjmp slot pointer.
+pub fn exit_env_ptr() -> *mut core::ffi::c_void {
+    current_exit_state().env.as_ptr()
+}
+
+/// Compat accessor for the old `EXIT_ARMED` flag.
+pub fn exit_armed() -> &'static AtomicU32 {
+    &current_exit_state().armed
+}
+
+/// Compat accessor for the old `EXIT_CODE` register.
+pub fn exit_code() -> &'static AtomicU32 {
+    &current_exit_state().code
+}
 
 /// Payload type kept around for compatibility — callers can ignore it.
 #[derive(Debug, Clone, Copy)]
@@ -68,13 +153,14 @@ pub struct ProcessExit {
 /// RCX) arrives in `x0` (AAPCS64 arg0). See
 /// `quantum-jit::lifter::lift_call_indirect`.
 #[unsafe(no_mangle)]
-pub extern "C" fn ExitProcess(exit_code: u32) -> ! {
-    EXIT_CODE.store(exit_code, Ordering::SeqCst);
-    if EXIT_ARMED.load(Ordering::SeqCst) != 0 {
-        longjmp(EXIT_ENV.as_ptr(), 1);
+pub extern "C" fn ExitProcess(code: u32) -> ! {
+    let st = current_exit_state();
+    st.code.store(code, Ordering::SeqCst);
+    if st.armed.load(Ordering::SeqCst) != 0 {
+        longjmp(st.env.as_ptr(), 1);
     }
     // No trap armed — the only sensible thing is to terminate.
-    std::process::exit(exit_code as i32);
+    std::process::exit(code as i32);
 }
 
 /// Arm the ExitProcess trap. Returns 0 on the direct call (caller
@@ -87,36 +173,35 @@ pub extern "C" fn ExitProcess(exit_code: u32) -> ! {
 /// short-circuited path.
 pub fn run_with_exit_trap<F: FnOnce()>(body: F) -> u32 {
     install_crash_handler();
-    // Snapshot the previous trap state so nested calls restore on exit.
-    // EXIT_ENV is overwritten by setjmp here; we copy the prior bytes
-    // out and put them back on the way out. This makes nested
-    // run_with_exit_trap calls compose: an inner crash / ExitProcess
-    // longjmps to the inner setjmp, the inner returns to its caller,
-    // and the outer's jmp_buf is restored bit-for-bit for any future
-    // crash to fire against it.
+    let st = current_exit_state();
+    // Snapshot the previous trap state on THIS thread so nested calls
+    // restore on exit. The env buf is overwritten by setjmp; we copy
+    // the prior bytes out and put them back on the way out. Nested
+    // run_with_exit_trap calls compose because each thread owns its
+    // own state — there's no cross-thread interference.
     let mut saved_env: [u8; 512] = [0; 512];
     unsafe {
-        let env_ptr = EXIT_ENV.as_ptr() as *const u8;
+        let env_ptr = st.env.as_ptr() as *const u8;
         core::ptr::copy_nonoverlapping(env_ptr, saved_env.as_mut_ptr(), 512);
     }
-    let saved_code = EXIT_CODE.swap(0, Ordering::SeqCst);
-    let saved_armed = EXIT_ARMED.swap(1, Ordering::SeqCst);
+    let saved_code = st.code.swap(0, Ordering::SeqCst);
+    let saved_armed = st.armed.swap(1, Ordering::SeqCst);
 
-    let rc = setjmp(EXIT_ENV.as_ptr());
+    let rc = setjmp(st.env.as_ptr());
     let result = if rc == 0 {
         body();
         u32::MAX
     } else {
-        EXIT_CODE.load(Ordering::SeqCst)
+        st.code.load(Ordering::SeqCst)
     };
 
     // Restore caller's trap state.
     unsafe {
-        let env_ptr = EXIT_ENV.as_ptr() as *mut u8;
+        let env_ptr = st.env.as_ptr() as *mut u8;
         core::ptr::copy_nonoverlapping(saved_env.as_ptr(), env_ptr, 512);
     }
-    EXIT_CODE.store(saved_code, Ordering::SeqCst);
-    EXIT_ARMED.store(saved_armed, Ordering::SeqCst);
+    st.code.store(saved_code, Ordering::SeqCst);
+    st.armed.store(saved_armed, Ordering::SeqCst);
 
     result
 }
@@ -241,9 +326,19 @@ extern "C" fn crash_handler(sig: i32, info: *mut DarwinSigInfo, ucontext: *mut c
     // longjmp from signal handler is technically allowed by POSIX
     // (siglongjmp is the safer cousin, but our setjmp impl is from libc
     // and the saved sigmask is restored on longjmp on Darwin).
-    EXIT_CODE.store(0xFFFF_FFFE, Ordering::SeqCst);
-    if EXIT_ARMED.load(Ordering::SeqCst) != 0 {
-        longjmp(EXIT_ENV.as_ptr(), 2);
+    //
+    // pthread_getspecific is async-signal-safe per POSIX, so it's OK
+    // to fetch this thread's ExitState from inside the handler.
+    let key = EXIT_KEY.load(Ordering::SeqCst);
+    if key >= 0 {
+        let p = unsafe { pthread_getspecific(key as u32) } as *const ExitState;
+        if !p.is_null() {
+            let st = unsafe { &*p };
+            st.code.store(0xFFFF_FFFE, Ordering::SeqCst);
+            if st.armed.load(Ordering::SeqCst) != 0 {
+                longjmp(st.env.as_ptr(), 2);
+            }
+        }
     }
     // Fall back to abort.
     unsafe {
