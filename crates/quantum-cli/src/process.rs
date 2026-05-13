@@ -196,6 +196,68 @@ fn load_side_dlls(
     out
 }
 
+/// Wire every side module's own IAT against the built-in resolver and
+/// the other side modules. Without this, calls through bink2w64.dll's
+/// own kernel32 imports land on uninitialised IAT slots and the DLL's
+/// DllMain SEGVs on the first IAT-routed call. We have to run this
+/// AFTER `load_side_dlls` so every transitive dependency is mapped.
+fn wire_side_module_iats(side_modules: &mut [SideModule], trace: bool) {
+    // Snapshot (name, base, exports-clone) so we can resolve into one
+    // side module while mutating another. The exports vec is small
+    // (typically <1000 entries per DLL) so a clone is cheap.
+    let snapshot: Vec<(String, quantum_loader::ExportTable, u64)> = side_modules
+        .iter()
+        .map(|s| (s.name.clone(), s.exports.clone(), s.image.actual_base))
+        .collect();
+
+    for sm in side_modules.iter_mut() {
+        let imp = match imports::parse(&sm.image) {
+            Ok(i) => i,
+            Err(e) => {
+                if trace {
+                    eprintln!("[trace] side-dll: {} import parse: {e}", sm.name);
+                }
+                continue;
+            }
+        };
+        let resolver = |dll: &str, function: &str| -> Option<u64> {
+            if let Some(addr) = resolve(dll, function) {
+                return Some(addr);
+            }
+            let lc = dll.to_ascii_lowercase();
+            for (name, exports, base) in &snapshot {
+                if *name != lc {
+                    continue;
+                }
+                let entry_idx = if let Some(ord_str) = function.strip_prefix('#') {
+                    let ord: u32 = ord_str.parse().ok()?;
+                    ord.checked_sub(exports.ordinal_base)? as usize
+                } else {
+                    let named = exports.names.iter().find(|n| n.name == function)?;
+                    named.ordinal.checked_sub(exports.ordinal_base)? as usize
+                };
+                let entry = exports.entries.get(entry_idx)?;
+                if let quantum_loader::ExportTarget::Rva(rva) = entry.target {
+                    return Some(base + rva as u64);
+                }
+                return None;
+            }
+            None
+        };
+        if let Err(e) = imports::wire_iat(&mut sm.image, &imp, resolver) {
+            if trace {
+                eprintln!("[trace] side-dll: {} IAT wire failed: {e}", sm.name);
+            }
+        } else if trace {
+            eprintln!(
+                "[trace] side-dll: {} IAT wired ({} DLLs)",
+                sm.name,
+                imp.dlls.len(),
+            );
+        }
+    }
+}
+
 /// Run a side-loaded DLL's TLS callbacks then its DllMain, both with
 /// PROCESS_ATTACH semantics. Each call runs inside its own
 /// `run_with_exit_trap` so a fault in one init doesn't abort the
@@ -378,11 +440,16 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
     // have built-in stubs for. fmodex / bink / oo2core etc. live next
     // to the main EXE; we map them into the same VM and tap their
     // exports.
-    let side_modules = if let Some(dir) = dll_dir {
+    let mut side_modules = if let Some(dir) = dll_dir {
         load_side_dlls(&imp, dir, &mem, trace)
     } else {
         Vec::new()
     };
+
+    // Wire each side DLL's own IAT against built-ins + peer side
+    // modules. Has to happen after all loads complete so transitive
+    // dependencies (e.g. fmod_event64 → fmodex64) are visible.
+    wire_side_module_iats(&mut side_modules, trace);
 
     let resolver = |dll: &str, function: &str| -> Option<u64> {
         if let Some(addr) = resolve(dll, function) {

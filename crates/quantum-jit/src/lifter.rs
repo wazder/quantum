@@ -285,18 +285,36 @@ impl<'a> Lifter<'a> {
             return m.disp as u32;
         }
         if m.disp > 0 {
-            self.emitter.add64_imm(xtmp, xtmp, m.disp as u32);
+            self.add64_imm_safe(xtmp, xtmp, m.disp as u32);
         } else {
-            let abs = m.disp.unsigned_abs();
-            if abs < (1 << 24) {
-                self.emitter.sub64_imm(xtmp, xtmp, abs);
-            } else {
-                // Materialise the displacement in x17 and add.
-                self.emitter.load_const64(Reg::X17, abs as u64);
-                self.emitter.sub64(xtmp, xtmp, Reg::X17);
-            }
+            self.sub64_imm_safe(xtmp, xtmp, m.disp.unsigned_abs());
         }
         0
+    }
+
+    /// Encodable-or-materialise ADD imm. AArch64 ADDS/SUBS-imm only
+    /// accepts values that fit `imm12` directly OR `imm12 << 12`; any
+    /// other 32-bit value has to be materialised into a scratch reg.
+    fn add64_imm_safe(&mut self, rd: Reg, rn: Reg, imm: u32) {
+        if Self::imm12_encodable(imm) {
+            self.emitter.add64_imm(rd, rn, imm);
+        } else {
+            self.emitter.load_const64(Reg::X17, imm as u64);
+            self.emitter.add64(rd, rn, Reg::X17);
+        }
+    }
+
+    fn sub64_imm_safe(&mut self, rd: Reg, rn: Reg, imm: u32) {
+        if Self::imm12_encodable(imm) {
+            self.emitter.sub64_imm(rd, rn, imm);
+        } else {
+            self.emitter.load_const64(Reg::X17, imm as u64);
+            self.emitter.sub64(rd, rn, Reg::X17);
+        }
+    }
+
+    fn imm12_encodable(v: u32) -> bool {
+        v < (1 << 12) || (v & 0xFFF == 0 && (v >> 12) < (1 << 12))
     }
 
     /// Emit `ADD Xd, Xn, Xm, LSL #shift`. We hand-encode because the
@@ -2658,7 +2676,9 @@ impl<'a> Lifter<'a> {
                 Ok(())
             }
             (Operand::Reg(rd, size), Operand::Imm(imm, _))
-                if (0..(1 << 24)).contains(&imm) && matches!(size, OpSize::B8 | OpSize::B4) =>
+                if imm >= 0
+                    && Self::imm12_encodable(imm as u32)
+                    && matches!(size, OpSize::B8 | OpSize::B4) =>
             {
                 let hd = host_reg(rd);
                 match kind {
@@ -2778,7 +2798,7 @@ impl<'a> Lifter<'a> {
                 Ok(())
             }
             (Operand::Reg(ra, OpSize::B4 | OpSize::B8), Operand::Imm(imm, _))
-                if (0..(1 << 24)).contains(&imm) =>
+                if imm >= 0 && Self::imm12_encodable(imm as u32) =>
             {
                 self.emitter.cmp64_imm(host_reg(ra), imm as u32);
                 Ok(())
@@ -2812,7 +2832,7 @@ impl<'a> Lifter<'a> {
                 };
                 let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
                 self.load_sized(Reg::X17, Reg::X16, leftover, size);
-                if (0..(1 << 24)).contains(&imm) {
+                if imm >= 0 && Self::imm12_encodable(imm as u32) {
                     self.emitter.cmp64_imm(Reg::X17, imm as u32);
                 } else {
                     self.emitter.load_const64(Reg::X16, imm as u64);
