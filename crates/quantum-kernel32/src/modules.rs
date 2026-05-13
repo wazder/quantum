@@ -99,17 +99,17 @@ static MODULES: &[ModuleEntry] = &[
     ModuleEntry {
         name: "advapi32.dll",
         handle: HANDLE_ADVAPI32,
-        resolve: stub_resolve,
+        resolve: crate::advapi32::resolve,
     },
     ModuleEntry {
         name: "winmm.dll",
         handle: HANDLE_WINMM,
-        resolve: stub_resolve,
+        resolve: crate::winmm::resolve,
     },
     ModuleEntry {
         name: "gdi32.dll",
         handle: HANDLE_GDI32,
-        resolve: stub_resolve,
+        resolve: crate::gdi32::resolve,
     },
     ModuleEntry {
         name: "ws2_32.dll",

@@ -29,6 +29,15 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("user32.dll") {
         return crate::user32::resolve(function);
     }
+    if dll.eq_ignore_ascii_case("gdi32.dll") {
+        return crate::gdi32::resolve(function);
+    }
+    if dll.eq_ignore_ascii_case("advapi32.dll") {
+        return crate::advapi32::resolve(function);
+    }
+    if dll.eq_ignore_ascii_case("winmm.dll") {
+        return crate::winmm::resolve(function);
+    }
     None
 }
 
