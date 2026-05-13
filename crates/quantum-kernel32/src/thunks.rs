@@ -19,6 +19,14 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
         "GetProcessHeap" => crate::heap::GetProcessHeap as *const (),
         "HeapAlloc" => crate::heap::HeapAlloc as *const (),
         "HeapFree" => crate::heap::HeapFree as *const (),
+        "Sleep" => crate::time::Sleep as *const (),
+        "GetTickCount" => crate::time::GetTickCount as *const (),
+        "GetTickCount64" => crate::time::GetTickCount64 as *const (),
+        "QueryPerformanceCounter" => crate::time::QueryPerformanceCounter as *const (),
+        "QueryPerformanceFrequency" => crate::time::QueryPerformanceFrequency as *const (),
+        "GetSystemTimeAsFileTime" => crate::time::GetSystemTimeAsFileTime as *const (),
+        "GetCurrentThreadId" => crate::time::GetCurrentThreadId as *const (),
+        "GetCurrentProcessId" => crate::time::GetCurrentProcessId as *const (),
         _ => return None,
     };
     Some(ptr as u64)
