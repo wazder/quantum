@@ -10,8 +10,14 @@ use core::ptr::NonNull;
 
 use quantum_core::Error as CoreError;
 use quantum_jit::block;
-use quantum_kernel32::process::run_with_exit_trap;
+use quantum_kernel32::process::{run_with_exit_trap, take_crash_info};
 use quantum_kernel32::resolve;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Last guest RIP entered by the dispatcher loop. Updated immediately
+/// before each `invoke_block_with_ctx` call so that if the guest faults
+/// inside that block we can still surface the source RIP.
+static LAST_ENTERED_RIP: AtomicU64 = AtomicU64::new(0);
 use quantum_loader::{LoadedImage, PeFile, apply_relocations, imports, load};
 use quantum_runtime::{
     Dispatcher, GuestContext, GuestStack, MachVmManager, STOP_SENTINEL, invoke_block_with_ctx,
@@ -113,6 +119,15 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
     });
 
     if trace {
+        if let Some(crash) = take_crash_info() {
+            eprintln!(
+                "[trace] FATAL signal {}: fault_addr={:#x}, host_pc={:#x}, last_guest_rip={:#x}",
+                crash.sig,
+                crash.fault_addr,
+                crash.host_pc,
+                LAST_ENTERED_RIP.load(Ordering::SeqCst),
+            );
+        }
         eprintln!("[trace] exited; code={exit_code:#x}");
     }
     Ok(exit_code)
@@ -153,7 +168,7 @@ fn run_dispatcher_loop(
             if trace {
                 eprintln!(
                     "[block] translating @ {current_rip:#x} (rva {rva:#x}, first bytes: {:02x?})",
-                    &bytes[..8.min(bytes.len())]
+                    &bytes[..32.min(bytes.len())]
                 );
             }
             let block = block::translate_for_dispatcher(&bytes, current_rip, None)
@@ -162,6 +177,7 @@ fn run_dispatcher_loop(
                 .map_err(RunError::Dispatcher)?
         };
 
+        LAST_ENTERED_RIP.store(current_rip, Ordering::SeqCst);
         // SAFETY: block respects the dispatcher prologue/epilogue
         // contract — reads ctx for guest regs, runs, spills back, RETs
         // with next_rip in X0.
