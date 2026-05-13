@@ -120,7 +120,7 @@ impl Default for XmmSaveArea32 {
 /// (the trailing VectorRegister area is included so the size matches
 /// what RtlCaptureContext writes).
 #[repr(C, align(16))]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct Context {
     pub p1_home: u64,
     pub p2_home: u64,
@@ -170,59 +170,6 @@ pub struct Context {
     pub last_exception_from_rip: u64,
 }
 
-impl Default for Context {
-    fn default() -> Self {
-        Self {
-            p1_home: 0,
-            p2_home: 0,
-            p3_home: 0,
-            p4_home: 0,
-            p5_home: 0,
-            p6_home: 0,
-            context_flags: 0,
-            mx_csr: 0,
-            seg_cs: 0,
-            seg_ds: 0,
-            seg_es: 0,
-            seg_fs: 0,
-            seg_gs: 0,
-            seg_ss: 0,
-            e_flags: 0,
-            dr0: 0,
-            dr1: 0,
-            dr2: 0,
-            dr3: 0,
-            dr6: 0,
-            dr7: 0,
-            rax: 0,
-            rcx: 0,
-            rdx: 0,
-            rbx: 0,
-            rsp: 0,
-            rbp: 0,
-            rsi: 0,
-            rdi: 0,
-            r8: 0,
-            r9: 0,
-            r10: 0,
-            r11: 0,
-            r12: 0,
-            r13: 0,
-            r14: 0,
-            r15: 0,
-            rip: 0,
-            flt_save: XmmSaveArea32::default(),
-            vector_register: [M128A::default(); 26],
-            vector_control: 0,
-            debug_control: 0,
-            last_branch_to_rip: 0,
-            last_branch_from_rip: 0,
-            last_exception_to_rip: 0,
-            last_exception_from_rip: 0,
-        }
-    }
-}
-
 /// Disposition codes a top-level filter returns. Values are the public
 /// EXCEPTION_* constants from `<excpt.h>`.
 pub const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
@@ -234,8 +181,11 @@ impl Context {
     /// `GuestContext::gprs` order: RAX, RCX, RDX, RBX, RSP, RBP, RSI,
     /// RDI, R8..R15) into the CONTEXT fields a Win64 SEH handler expects.
     pub fn from_guest_gprs(gprs: &[u64; 16], rip: u64, flags: u64) -> Self {
-        let mut c = Self::default();
-        c.context_flags = 0x0010_0007; // CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS
+        let mut c = Self {
+            // CONTEXT_AMD64 | CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS
+            context_flags: 0x0010_0007,
+            ..Self::default()
+        };
         c.rax = gprs[0];
         c.rcx = gprs[1];
         c.rdx = gprs[2];

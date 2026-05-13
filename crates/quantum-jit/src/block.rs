@@ -127,7 +127,13 @@ pub fn translate_for_dispatcher(
         let inst = decoder.next()?;
         let is_terminator = matches!(
             inst.op,
-            Op::Jmp | Op::Jcc(_) | Op::Ret | Op::Ud2 | Op::JmpIndirect | Op::Call
+            Op::Jmp
+                | Op::Jcc(_)
+                | Op::Ret
+                | Op::RetImm
+                | Op::Ud2
+                | Op::JmpIndirect
+                | Op::Call
         );
         insts.push(inst);
         if is_terminator || decoder.remaining() == 0 {
@@ -197,6 +203,18 @@ pub fn translate_for_dispatcher(
     let term = &insts[last];
     match term.op {
         Op::Ud2 => emit_epilogue_const_rip(&mut emitter, STOP_SENTINEL),
+        Op::RetImm => {
+            // Pop return addr, then pop imm16 bytes from caller stack.
+            let extra = match term.operands[0] {
+                Some(Operand::Imm(imm, _)) => imm as u32,
+                _ => return Err(BlockError::BadOperand),
+            };
+            emitter.ldr64(Reg::X16, Reg::x(19), 0);
+            emitter.add64_imm(Reg::x(19), Reg::x(19), 8 + extra);
+            emit_regs_to_ctx(&mut emitter);
+            emitter.mov64(Reg::X0, Reg::X16);
+            emit_host_epilogue(&mut emitter);
+        }
         Op::Ret => {
             // Pop guest stack into X16, advance X19, then dispatcher exit
             // with X16 as the next RIP.

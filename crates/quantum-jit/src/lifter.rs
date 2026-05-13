@@ -75,6 +75,9 @@ impl<'a> Lifter<'a> {
             Op::Idiv => self.lift_divmul(inst, DivMulKind::Idiv),
             Op::Mul => self.lift_divmul(inst, DivMulKind::Mul),
             Op::Imul if inst.operands[1].is_none() => self.lift_divmul(inst, DivMulKind::Imul1),
+            Op::Imul => self.lift_imul_n_operand(inst),
+            Op::Adc => self.lift_addc(inst, true),
+            Op::Sbb => self.lift_addc(inst, false),
             Op::Neg => self.lift_neg(inst),
             Op::Not => self.lift_not(inst),
             Op::Cdq => {
@@ -586,6 +589,95 @@ impl<'a> Lifter<'a> {
     /// (the overwhelmingly common idiom `xor rdx, rdx; div r`). For
     /// 32-bit we combine EDX:EAX into a 64-bit dividend, divide
     /// against the 32-bit divisor, then mask the results.
+    /// 2-operand and 3-operand IMUL.
+    /// 2-op: `imul rd, r/m`         → rd = rd * r/m
+    /// 3-op: `imul rd, r/m, imm`    → rd = r/m * imm
+    /// Only the low half is written to rd; the high half is discarded.
+    fn lift_imul_n_operand(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let a = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let b_imm = inst.operands[2];
+
+        let (rd, size) = match dst {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(Op::Imul)),
+        };
+
+        // Get factor A into X17.
+        match a {
+            Operand::Reg(rs, _) => {
+                self.emitter.mov64(Reg::X17, host_reg(rs));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+            }
+            _ => return Err(LifterError::Unsupported(Op::Imul)),
+        }
+
+        // Get factor B (= rd for 2-op, imm for 3-op) into X16.
+        match b_imm {
+            Some(Operand::Imm(imm, _)) => {
+                self.emitter.load_const64(Reg::X16, imm as u64);
+            }
+            None => {
+                // 2-operand form: factor B is the destination's current value.
+                self.emitter.mov64(Reg::X16, rd);
+            }
+            _ => return Err(LifterError::Unsupported(Op::Imul)),
+        }
+
+        self.emitter.mul64(rd, Reg::X17, Reg::X16);
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(rd, rd);
+        }
+        Ok(())
+    }
+
+    /// ADC / SBB — add/subtract with carry. We compute the result as
+    /// `rd = rd ± src ± C`. Sets NZCV. AArch64 has ADCS/SBCS encoded
+    /// in the same family but we hand-encode here since the emitter
+    /// doesn't expose them yet.
+    fn lift_addc(&mut self, inst: &Inst, add: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (rd, size) = match dst {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        // Materialise source into X17.
+        match src {
+            Operand::Reg(rs, _) => self.emitter.mov64(Reg::X17, host_reg(rs)),
+            Operand::Imm(imm, _) => self.emitter.load_const64(Reg::X17, imm as u64),
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let mem_size = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, mem_size);
+            }
+        }
+        // ADCS Xd, Xn, Xm = 0xBA00_0000 | (Rm<<16) | (Rn<<5) | Rd
+        // SBCS Xd, Xn, Xm = 0xFA00_0000 | (Rm<<16) | (Rn<<5) | Rd
+        let base = if add { 0xBA00_0000 } else { 0xFA00_0000 };
+        let w = base
+            | ((Reg::X17.raw() as u32) << 16)
+            | ((rd.raw() as u32) << 5)
+            | (rd.raw() as u32);
+        self.emitter.raw_word(w);
+        if matches!(size, OpSize::B4) {
+            self.emit_and_imm_lo32(rd, rd);
+        }
+        Ok(())
+    }
+
     fn lift_divmul(&mut self, inst: &Inst, kind: DivMulKind) -> LifterResult<()> {
         let rm_op = inst.operands[0].ok_or(LifterError::BadOperands)?;
         // Materialise the divisor/multiplier into X17.
