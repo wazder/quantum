@@ -12,6 +12,7 @@ pub mod gdi32;
 pub mod handles;
 pub mod heap;
 pub mod io;
+pub mod misc_win;
 pub mod modules;
 pub mod process;
 pub mod seh;
