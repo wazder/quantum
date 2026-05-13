@@ -57,6 +57,189 @@ pub struct Block {
     pub guest_len: usize,
 }
 
+/// Sentinel value the dispatcher recognises as "guest hit UD2 / stop".
+/// Must match `quantum_runtime::dispatcher::STOP_SENTINEL`. Re-declared
+/// here to keep quantum-jit free of a runtime dependency.
+pub const STOP_SENTINEL: u64 = 0xDEAD_DEAD_DEAD_DEAD;
+
+/// Translate one basic block in dispatcher mode.
+///
+/// "Basic block" here means: instructions starting at `start_rip` and
+/// running until the first control-flow op (JMP, Jcc, RET, UD2). On
+/// exit the block writes the next guest RIP to X0 and returns to the
+/// dispatcher (a host RET). The dispatcher then looks up the next RIP
+/// in its `BlockMap` and jumps in (or translates first on miss).
+///
+/// Compared to `translate_with_stack`, this:
+///   * Stops at the *first* control-flow op rather than running through
+///     an entire user-supplied terminator set.
+///   * Emits dispatcher exits (`mov x0, <next_rip>; ret`) for every
+///     terminator instead of host RETs and intra-block labels.
+///   * Supports out-of-block JMP/Jcc targets natively.
+pub fn translate_for_dispatcher(
+    bytes: &[u8],
+    start_rip: u64,
+    _stack_top: Option<u64>,
+) -> Result<Block, BlockError> {
+    use crate::emitter::Reg;
+
+    let mut decoder = Decoder::new(bytes, start_rip);
+    let mut insts: Vec<Inst> = Vec::new();
+
+    loop {
+        let inst = decoder.next()?;
+        let is_terminator = matches!(
+            inst.op,
+            Op::Jmp | Op::Jcc(_) | Op::Ret | Op::Ud2 | Op::JmpIndirect
+        );
+        insts.push(inst);
+        if is_terminator || decoder.remaining() == 0 {
+            break;
+        }
+    }
+    let guest_len = decoder.pos();
+
+    let mut emitter = Emitter::new();
+
+    // ---- Dispatcher prologue ----
+    // Save host callee-saved regs we touch:
+    //   X19 (guest RSP), X28 (ctx pointer), X29 (FP), X30 (LR)
+    // Then capture the AAPCS64 arg0 (X0 = *GuestContext) into X28 and
+    // reload all 16 guest GPRs from ctx.
+    emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
+    emitter.stp64_pre(Reg::x(19), Reg::x(28), Reg::SP, -16);
+    emitter.mov64(Reg::x(28), Reg::X0);
+    emit_ctx_to_regs(&mut emitter);
+
+    // ---- Body ----
+    let last = insts.len() - 1;
+    for inst in &insts[..last] {
+        Lifter::new(&mut emitter).lift(inst)?;
+    }
+
+    // ---- Terminator ----
+    let term = &insts[last];
+    match term.op {
+        Op::Ud2 => emit_epilogue_const_rip(&mut emitter, STOP_SENTINEL),
+        Op::Ret => {
+            // Pop guest stack into X16, advance X19, then dispatcher exit
+            // with X16 as the next RIP.
+            emitter.ldr64(Reg::X16, Reg::x(19), 0);
+            emitter.add64_imm(Reg::x(19), Reg::x(19), 8);
+            emit_regs_to_ctx(&mut emitter);
+            emitter.mov64(Reg::X0, Reg::X16);
+            emit_host_epilogue(&mut emitter);
+        }
+        Op::Jmp => {
+            let rel = match term.operands[0] {
+                Some(Operand::Imm(rel, _)) => rel,
+                _ => return Err(BlockError::BadOperand),
+            };
+            let target = term
+                .guest_rip
+                .wrapping_add(term.len as u64)
+                .wrapping_add(rel as u64);
+            emit_epilogue_const_rip(&mut emitter, target);
+        }
+        Op::Jcc(cond) => {
+            let rel = match term.operands[0] {
+                Some(Operand::Imm(rel, _)) => rel,
+                _ => return Err(BlockError::BadOperand),
+            };
+            let taken_rip = term
+                .guest_rip
+                .wrapping_add(term.len as u64)
+                .wrapping_add(rel as u64);
+            let fallthrough_rip = term.guest_rip.wrapping_add(term.len as u64);
+            let a64_cond = cond_x86_to_a64(cond).ok_or(BlockError::UnsupportedCondition)?;
+            let taken_label = emitter.make_label();
+            emitter.b_cond(a64_cond, taken_label);
+            // Fallthrough side.
+            emit_epilogue_const_rip(&mut emitter, fallthrough_rip);
+            // Taken side.
+            emitter.bind(taken_label);
+            emit_epilogue_const_rip(&mut emitter, taken_rip);
+        }
+        Op::JmpIndirect => {
+            return Err(BlockError::Lift(LifterError::Unsupported(Op::JmpIndirect)));
+        }
+        _ => {
+            // No terminator decoded — bytes ran out. Stop the
+            // dispatcher cleanly.
+            emit_epilogue_const_rip(&mut emitter, STOP_SENTINEL);
+        }
+    }
+
+    emitter.finish()?;
+    Ok(Block {
+        host_bytes: emitter.bytes(),
+        guest_len,
+    })
+}
+
+/// Load guest GPRs from `[X28 + offset]` into their pinned host regs.
+/// Offsets match `GuestContext::gprs[idx] * 8`.
+fn emit_ctx_to_regs(emitter: &mut Emitter) {
+    use crate::emitter::Reg;
+    let ctx = Reg::x(28);
+    emitter.ldr64(Reg::X0, ctx, 0); // RAX
+    emitter.ldr64(Reg::X1, ctx, 8); // RCX
+    emitter.ldr64(Reg::X2, ctx, 16); // RDX
+    emitter.ldr64(Reg::X3, ctx, 24); // RBX
+    emitter.ldr64(Reg::x(19), ctx, 32); // RSP
+    emitter.ldr64(Reg::x(5), ctx, 40); // RBP
+    emitter.ldr64(Reg::x(6), ctx, 48); // RSI
+    emitter.ldr64(Reg::x(7), ctx, 56); // RDI
+    emitter.ldr64(Reg::x(8), ctx, 64); // R8
+    emitter.ldr64(Reg::x(9), ctx, 72); // R9
+    emitter.ldr64(Reg::x(10), ctx, 80); // R10
+    emitter.ldr64(Reg::x(11), ctx, 88); // R11
+    emitter.ldr64(Reg::x(12), ctx, 96); // R12
+    emitter.ldr64(Reg::x(13), ctx, 104); // R13
+    emitter.ldr64(Reg::x(14), ctx, 112); // R14
+    emitter.ldr64(Reg::x(15), ctx, 120); // R15
+}
+
+/// Inverse of `emit_ctx_to_regs`: spill pinned host regs back to ctx.
+fn emit_regs_to_ctx(emitter: &mut Emitter) {
+    use crate::emitter::Reg;
+    let ctx = Reg::x(28);
+    emitter.str64(Reg::X0, ctx, 0);
+    emitter.str64(Reg::X1, ctx, 8);
+    emitter.str64(Reg::X2, ctx, 16);
+    emitter.str64(Reg::X3, ctx, 24);
+    emitter.str64(Reg::x(19), ctx, 32);
+    emitter.str64(Reg::x(5), ctx, 40);
+    emitter.str64(Reg::x(6), ctx, 48);
+    emitter.str64(Reg::x(7), ctx, 56);
+    emitter.str64(Reg::x(8), ctx, 64);
+    emitter.str64(Reg::x(9), ctx, 72);
+    emitter.str64(Reg::x(10), ctx, 80);
+    emitter.str64(Reg::x(11), ctx, 88);
+    emitter.str64(Reg::x(12), ctx, 96);
+    emitter.str64(Reg::x(13), ctx, 104);
+    emitter.str64(Reg::x(14), ctx, 112);
+    emitter.str64(Reg::x(15), ctx, 120);
+}
+
+/// Common epilogue tail: pop the saved host regs and RET. X0 must be
+/// pre-loaded with the next-block guest RIP.
+fn emit_host_epilogue(emitter: &mut Emitter) {
+    use crate::emitter::Reg;
+    emitter.ldp64_post(Reg::x(19), Reg::x(28), Reg::SP, 16);
+    emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
+    emitter.ret();
+}
+
+/// Dispatcher exit with a constant next-block RIP. Spills regs, sets
+/// X0, and tails the host epilogue.
+fn emit_epilogue_const_rip(emitter: &mut Emitter, next_rip: u64) {
+    use crate::emitter::Reg;
+    emit_regs_to_ctx(emitter);
+    emitter.load_const64(Reg::X0, next_rip);
+    emit_host_epilogue(emitter);
+}
+
 /// Translate a sequence of guest instructions into AArch64 bytes.
 ///
 /// `bytes` is read by the decoder; `start_rip` is the guest virtual
