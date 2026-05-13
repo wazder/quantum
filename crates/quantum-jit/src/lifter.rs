@@ -138,6 +138,9 @@ impl<'a> Lifter<'a> {
             Op::CvtSsToSd => self.lift_cvt_precision(inst, true),
             Op::CvtSdToSs => self.lift_cvt_precision(inst, false),
             Op::UcomisScalar => self.lift_ucomis(inst),
+            Op::MinScalar => self.lift_scalar_fp(inst, FpOp::Min),
+            Op::MaxScalar => self.lift_scalar_fp(inst, FpOp::Max),
+            Op::SqrtScalar => self.lift_sqrt_scalar(inst),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1107,6 +1110,10 @@ impl<'a> Lifter<'a> {
             (FpOp::Sub, OpSize::B4) => self.emitter.fsub_s(dst_v, dst_v, src_v),
             (FpOp::Mul, OpSize::B4) => self.emitter.fmul_s(dst_v, dst_v, src_v),
             (FpOp::Div, OpSize::B4) => self.emitter.fdiv_s(dst_v, dst_v, src_v),
+            (FpOp::Min, OpSize::B8) => self.emitter.fmin_d(dst_v, dst_v, src_v),
+            (FpOp::Min, OpSize::B4) => self.emitter.fmin_s(dst_v, dst_v, src_v),
+            (FpOp::Max, OpSize::B8) => self.emitter.fmax_d(dst_v, dst_v, src_v),
+            (FpOp::Max, OpSize::B4) => self.emitter.fmax_s(dst_v, dst_v, src_v),
             _ => return Err(LifterError::Unsupported(inst.op)),
         }
         // Store back, preserving the rest of the XMM slot.
@@ -1262,6 +1269,50 @@ impl<'a> Lifter<'a> {
             self.emitter.str_d(scratch_v, Reg::x(28), off);
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
+        }
+        Ok(())
+    }
+
+    /// SQRTSS / SQRTSD — scalar FP square root. NEON FSQRT.
+    fn lift_sqrt_scalar(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (dst_idx, size) = match dst {
+            Operand::XmmReg(d, s) => (d, s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let scratch_v = Reg::x(16);
+        // Load src scalar.
+        match src {
+            Operand::XmmReg(s, _) => match size {
+                OpSize::B8 => self
+                    .emitter
+                    .ldr_d(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s)),
+                OpSize::B4 => self
+                    .emitter
+                    .ldr_s(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s)),
+                _ => return Err(LifterError::Unsupported(inst.op)),
+            },
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                match size {
+                    OpSize::B8 => self.emitter.ldr_d(scratch_v, Reg::X17, leftover),
+                    OpSize::B4 => self.emitter.ldr_s(scratch_v, Reg::X17, leftover),
+                    _ => return Err(LifterError::Unsupported(inst.op)),
+                }
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        match size {
+            OpSize::B8 => self.emitter.fsqrt_d(scratch_v, scratch_v),
+            OpSize::B4 => self.emitter.fsqrt_s(scratch_v, scratch_v),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        let off = Self::xmm_ctx_offset(dst_idx);
+        match size {
+            OpSize::B8 => self.emitter.str_d(scratch_v, Reg::x(28), off),
+            OpSize::B4 => self.emitter.str_s(scratch_v, Reg::x(28), off),
+            _ => return Err(LifterError::Unsupported(inst.op)),
         }
         Ok(())
     }
@@ -2125,6 +2176,8 @@ enum FpOp {
     Sub,
     Mul,
     Div,
+    Min,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy)]

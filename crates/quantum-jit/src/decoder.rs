@@ -883,6 +883,24 @@ impl<'a> Decoder<'a> {
                 let xmm = Operand::XmmReg(reg, size);
                 Ok(make(Op::UcomisScalar, [Some(xmm), Some(rm), None], rip))
             }
+            //   F3 0F 51 /r SQRTSS xmm, xmm/m32
+            //   F2 0F 51 /r SQRTSD xmm, xmm/m64
+            //   F3 0F 5D /r MINSS
+            //   F2 0F 5D /r MINSD
+            //   F3 0F 5F /r MAXSS
+            //   F2 0F 5F /r MAXSD
+            0x51 | 0x5D | 0x5F if p.repne || p.repe => {
+                let size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                let op = match opcode {
+                    0x51 => Op::SqrtScalar,
+                    0x5D => Op::MinScalar,
+                    0x5F => Op::MaxScalar,
+                    _ => unreachable!(),
+                };
+                Ok(make(op, [Some(xmm), Some(rm), None], rip))
+            }
             // 0F 1F /0 multi-byte NOP (variable length)
             0x1F => {
                 let _ = self.decode_modrm(p, OpSize::B4)?;

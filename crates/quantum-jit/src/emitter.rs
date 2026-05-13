@@ -808,6 +808,33 @@ impl Emitter {
         let w = 0x1E60_2000 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5);
         self.push(w);
     }
+
+    // FP min / max — same fp2src family, different opcode field.
+    /// FMIN Sd, Sn, Sm.
+    pub fn fmin_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E20_5800, vd, vn, vm);
+    }
+    /// FMIN Dd, Dn, Dm.
+    pub fn fmin_d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E60_5800, vd, vn, vm);
+    }
+    /// FMAX Sd, Sn, Sm.
+    pub fn fmax_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E20_4800, vd, vn, vm);
+    }
+    /// FMAX Dd, Dn, Dm.
+    pub fn fmax_d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        self.fp2src(0x1E60_4800, vd, vn, vm);
+    }
+
+    /// FSQRT Sd, Sn — single-precision square root.
+    pub fn fsqrt_s(&mut self, vd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E21_C000, vd, vn);
+    }
+    /// FSQRT Dd, Dn — double-precision square root.
+    pub fn fsqrt_d(&mut self, vd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E61_C000, vd, vn);
+    }
 }
 
 // =============== Load/Store pair ===============
