@@ -328,7 +328,201 @@ pub fn resolve(function: &str) -> Option<u64> {
         "SetSecurityDescriptorDacl" => SetSecurityDescriptorDacl as *const (),
         "GetUserNameA" => GetUserNameA as *const (),
         "GetUserNameW" => GetUserNameW as *const (),
+        "RegOpenKeyA" => RegOpenKeyA as *const (),
+        "RegOpenKeyW" => RegOpenKeyW as *const (),
+        "RegOpenKeyExA" => RegOpenKeyExA as *const (),
+        "RegOpenKeyExW" => RegOpenKeyExW as *const (),
+        "RegCloseKey" => RegCloseKey as *const (),
+        "RegEnumKeyA" => RegEnumKeyA as *const (),
+        "RegEnumKeyW" => RegEnumKeyW as *const (),
+        "RegEnumKeyExA" => RegEnumKeyExA as *const (),
+        "RegEnumKeyExW" => RegEnumKeyExW as *const (),
+        "RegQueryValueExA" => RegQueryValueExA as *const (),
+        "RegQueryValueExW" => RegQueryValueExW as *const (),
+        "RegSetValueExA" => RegSetValueExA as *const (),
+        "RegSetValueExW" => RegSetValueExW as *const (),
+        "RegCreateKeyExA" => RegCreateKeyExA as *const (),
+        "RegCreateKeyExW" => RegCreateKeyExW as *const (),
+        "RegDeleteKeyA" => RegDeleteKeyA as *const (),
+        "RegDeleteValueA" => RegDeleteValueA as *const (),
         _ => return None,
     };
     Some(p as u64)
+}
+
+// ---- Registry stubs ----
+//
+// All returns ERROR_FILE_NOT_FOUND (2) so callers fall back to defaults.
+// Eventually we may back the registry against a key-value file, but for
+// now most games just check "is feature X enabled" and proceed without.
+
+const ERROR_FILE_NOT_FOUND: i32 = 2;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegOpenKeyA(_h: usize, _sub: *const i8, _key: *mut usize) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegOpenKeyW(_h: usize, _sub: *const u16, _key: *mut usize) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegOpenKeyExA(
+    _h: usize,
+    _sub: *const i8,
+    _opts: u32,
+    _access: u32,
+    _key: *mut usize,
+) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegOpenKeyExW(
+    _h: usize,
+    _sub: *const u16,
+    _opts: u32,
+    _access: u32,
+    _key: *mut usize,
+) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegCloseKey(_h: usize) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegEnumKeyA(_h: usize, _idx: u32, _name: *mut i8, _len: u32) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegEnumKeyW(_h: usize, _idx: u32, _name: *mut u16, _len: u32) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegEnumKeyExA(
+    _h: usize,
+    _idx: u32,
+    _name: *mut i8,
+    _name_len: *mut u32,
+    _reserved: *mut u32,
+    _class: *mut i8,
+    _class_len: *mut u32,
+    _ft: *mut u64,
+) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegEnumKeyExW(
+    _h: usize,
+    _idx: u32,
+    _name: *mut u16,
+    _name_len: *mut u32,
+    _reserved: *mut u32,
+    _class: *mut u16,
+    _class_len: *mut u32,
+    _ft: *mut u64,
+) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegQueryValueExA(
+    _h: usize,
+    _name: *const i8,
+    _reserved: *mut u32,
+    _type_out: *mut u32,
+    _data: *mut u8,
+    _data_len: *mut u32,
+) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegQueryValueExW(
+    _h: usize,
+    _name: *const u16,
+    _reserved: *mut u32,
+    _type_out: *mut u32,
+    _data: *mut u8,
+    _data_len: *mut u32,
+) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegSetValueExA(
+    _h: usize,
+    _name: *const i8,
+    _reserved: u32,
+    _type_: u32,
+    _data: *const u8,
+    _data_len: u32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegSetValueExW(
+    _h: usize,
+    _name: *const u16,
+    _reserved: u32,
+    _type_: u32,
+    _data: *const u8,
+    _data_len: u32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegCreateKeyExA(
+    _h: usize,
+    _sub: *const i8,
+    _reserved: u32,
+    _class: *const i8,
+    _opts: u32,
+    _access: u32,
+    _attrs: *mut core::ffi::c_void,
+    out_key: *mut usize,
+    _disp: *mut u32,
+) -> i32 {
+    if !out_key.is_null() {
+        unsafe { *out_key = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegCreateKeyExW(
+    _h: usize,
+    _sub: *const u16,
+    _reserved: u32,
+    _class: *const u16,
+    _opts: u32,
+    _access: u32,
+    _attrs: *mut core::ffi::c_void,
+    out_key: *mut usize,
+    _disp: *mut u32,
+) -> i32 {
+    if !out_key.is_null() {
+        unsafe { *out_key = 0 };
+    }
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegDeleteKeyA(_h: usize, _sub: *const i8) -> i32 {
+    ERROR_FILE_NOT_FOUND
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegDeleteValueA(_h: usize, _name: *const i8) -> i32 {
+    ERROR_FILE_NOT_FOUND
 }

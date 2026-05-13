@@ -148,6 +148,29 @@ pub extern "C" fn mciSendCommandA(_id: u32, _msg: u32, _flags: usize, _params: u
     0
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn waveOutPause(_h: usize) -> u32 {
+    MMSYSERR_NOERROR
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waveOutRestart(_h: usize) -> u32 {
+    MMSYSERR_NOERROR
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waveOutSetVolume(_h: usize, _volume: u32) -> u32 {
+    MMSYSERR_NOERROR
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waveOutGetVolume(_h: usize, volume_out: *mut u32) -> u32 {
+    if !volume_out.is_null() {
+        unsafe { *volume_out = 0xFFFF_FFFF };
+    }
+    MMSYSERR_NOERROR
+}
+
 pub fn resolve(function: &str) -> Option<u64> {
     let p: *const () = match function {
         "timeBeginPeriod" => timeBeginPeriod as *const (),
@@ -174,6 +197,10 @@ pub fn resolve(function: &str) -> Option<u64> {
         "waveInStart" => waveInStart as *const (),
         "waveInReset" => waveInReset as *const (),
         "mciSendCommandA" => mciSendCommandA as *const (),
+        "waveOutPause" => waveOutPause as *const (),
+        "waveOutRestart" => waveOutRestart as *const (),
+        "waveOutSetVolume" => waveOutSetVolume as *const (),
+        "waveOutGetVolume" => waveOutGetVolume as *const (),
         _ => return None,
     };
     Some(p as u64)

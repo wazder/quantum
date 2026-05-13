@@ -447,9 +447,77 @@ pub fn resolve(function: &str) -> Option<u64> {
         "GetWindowThreadProcessId" => GetWindowThreadProcessId as *const (),
         "EnumDisplayDevicesA" => EnumDisplayDevicesA as *const (),
         "EnumDisplayDevicesW" => EnumDisplayDevicesW as *const (),
+        "CharLowerBuffA" => CharLowerBuffA as *const (),
+        "CharLowerBuffW" => CharLowerBuffW as *const (),
+        "CharUpperBuffA" => CharUpperBuffA as *const (),
+        "CharUpperBuffW" => CharUpperBuffW as *const (),
         _ => return None,
     };
     Some(p as u64)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CharLowerBuffA(buf: *mut u8, len: u32) -> u32 {
+    if buf.is_null() {
+        return 0;
+    }
+    for i in 0..len as usize {
+        unsafe {
+            let b = *buf.add(i);
+            if b.is_ascii_uppercase() {
+                *buf.add(i) = b + 32;
+            }
+        }
+    }
+    len
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CharLowerBuffW(buf: *mut u16, len: u32) -> u32 {
+    if buf.is_null() {
+        return 0;
+    }
+    for i in 0..len as usize {
+        unsafe {
+            let c = *buf.add(i);
+            if (b'A' as u16..=b'Z' as u16).contains(&c) {
+                *buf.add(i) = c + 32;
+            }
+        }
+    }
+    len
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CharUpperBuffA(buf: *mut u8, len: u32) -> u32 {
+    if buf.is_null() {
+        return 0;
+    }
+    for i in 0..len as usize {
+        unsafe {
+            let b = *buf.add(i);
+            if b.is_ascii_lowercase() {
+                *buf.add(i) = b - 32;
+            }
+        }
+    }
+    len
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CharUpperBuffW(buf: *mut u16, len: u32) -> u32 {
+    if buf.is_null() {
+        return 0;
+    }
+    for i in 0..len as usize {
+        unsafe {
+            let c = *buf.add(i);
+            if (b'a' as u16..=b'z' as u16).contains(&c) {
+                *buf.add(i) = c - 32;
+            }
+        }
+    }
+    len
 }
 
 #[unsafe(no_mangle)]

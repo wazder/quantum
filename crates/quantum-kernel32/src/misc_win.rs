@@ -263,9 +263,26 @@ pub fn resolve_ole32(function: &str) -> Option<u64> {
         "CoTaskMemFree" => CoTaskMemFree as *const (),
         "CoCreateGuid" => CoCreateGuid as *const (),
         "CoSetProxyBlanket" => CoSetProxyBlanket as *const (),
+        "CLSIDFromString" => CLSIDFromString as *const (),
+        "PropVariantClear" => PropVariantClear as *const (),
         _ => return None,
     };
     Some(p as u64)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CLSIDFromString(_s: *const u16, clsid_out: *mut u8) -> i32 {
+    if !clsid_out.is_null() {
+        unsafe { core::ptr::write_bytes(clsid_out, 0, 16) };
+    }
+    // CO_E_CLASSSTRING (0x800401F3) — caller usually retries with a
+    // hardcoded CLSID, which is fine.
+    0x800401F3u32 as i32
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PropVariantClear(_pv: *mut c_void) -> i32 {
+    0
 }
 
 pub fn resolve_imm32(function: &str) -> Option<u64> {

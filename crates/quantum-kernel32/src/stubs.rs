@@ -1083,6 +1083,100 @@ pub extern "C" fn TlsSetValue(idx: u32, val: *mut c_void) -> i32 {
     1
 }
 
+// Fiber-local storage. We don't implement fibers; we collapse Fls onto
+// Tls so the FLS index space is the same as the TLS index space. The
+// callback type passed to FlsAlloc is ignored — it would fire on thread
+// exit, which we don't model.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FlsAlloc(_callback: *const c_void) -> u32 {
+    TlsAlloc()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FlsFree(idx: u32) -> i32 {
+    TlsFree(idx)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FlsGetValue(idx: u32) -> *mut c_void {
+    TlsGetValue(idx)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn FlsSetValue(idx: u32, val: *mut c_void) -> i32 {
+    TlsSetValue(idx, val)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetHandleCount(count: u32) -> u32 {
+    count
+}
+
+// Waitable timers — not implemented; return invalid-handle so callers
+// fall back. Most game code only uses these as sleep helpers.
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateWaitableTimerA(
+    _attrs: *mut c_void,
+    _manual_reset: i32,
+    _name: *const i8,
+) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn CreateWaitableTimerW(
+    _attrs: *mut c_void,
+    _manual_reset: i32,
+    _name: *const u16,
+) -> usize {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SetWaitableTimer(
+    _handle: usize,
+    _due_time: *const i64,
+    _period: i32,
+    _complete: *const c_void,
+    _arg: *const c_void,
+    _resume: i32,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetVersionExA(info: *mut c_void) -> i32 {
+    // OSVERSIONINFO[EX]A first u32 is dwOSVersionInfoSize; next u32s are
+    // dwMajor / dwMinor / dwBuildNumber / dwPlatformId. Write Windows 10
+    // 19041 values — most games whitelist >= 6.0.
+    if info.is_null() {
+        return 0;
+    }
+    unsafe {
+        let p = info as *mut u32;
+        // [size, major, minor, build, platform_id]
+        *p.add(1) = 10;
+        *p.add(2) = 0;
+        *p.add(3) = 19041;
+        *p.add(4) = 2; // VER_PLATFORM_WIN32_NT
+        // szCSDVersion (128 chars) - zero out
+        let csd = (info as *mut u8).add(20);
+        core::ptr::write_bytes(csd, 0, 128);
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn OpenFile(
+    _name: *const i8,
+    _ofstruct: *mut c_void,
+    _style: u32,
+) -> i32 {
+    -1 // HFILE_ERROR
+}
+
 // =============== Local / Global alloc (legacy aliases for heap) ===============
 
 #[unsafe(no_mangle)]
