@@ -90,7 +90,7 @@ pub fn translate_for_dispatcher(
         let inst = decoder.next()?;
         let is_terminator = matches!(
             inst.op,
-            Op::Jmp | Op::Jcc(_) | Op::Ret | Op::Ud2 | Op::JmpIndirect
+            Op::Jmp | Op::Jcc(_) | Op::Ret | Op::Ud2 | Op::JmpIndirect | Op::Call
         );
         insts.push(inst);
         if is_terminator || decoder.remaining() == 0 {
@@ -139,6 +139,28 @@ pub fn translate_for_dispatcher(
                 .guest_rip
                 .wrapping_add(term.len as u64)
                 .wrapping_add(rel as u64);
+            emit_epilogue_const_rip(&mut emitter, target);
+        }
+        Op::Call => {
+            // Direct CALL rel32: push return address on guest stack and
+            // dispatcher-exit with the call target as next_rip.
+            //   sub  x19, x19, #8
+            //   load_const64 x16, <return_addr>
+            //   str  x16, [x19]
+            //   (then standard epilogue with next_rip = target)
+            let rel = match term.operands[0] {
+                Some(Operand::Imm(rel, _)) => rel,
+                _ => return Err(BlockError::BadOperand),
+            };
+            let target = term
+                .guest_rip
+                .wrapping_add(term.len as u64)
+                .wrapping_add(rel as u64);
+            let return_addr = term.guest_rip.wrapping_add(term.len as u64);
+            use crate::emitter::Reg;
+            emitter.sub64_imm(Reg::x(19), Reg::x(19), 8);
+            emitter.load_const64(Reg::X16, return_addr);
+            emitter.str64(Reg::X16, Reg::x(19), 0);
             emit_epilogue_const_rip(&mut emitter, target);
         }
         Op::Jcc(cond) => {
