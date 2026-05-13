@@ -108,8 +108,18 @@ pub fn remove(handle: usize) -> bool {
         Some(s) => s,
         None => return false,
     };
-    if let Some((g, _)) = slot.as_ref() {
+    if let Some((g, obj)) = slot.as_ref() {
         if *g == generation {
+            // Release POSIX fd if this was a File handle.
+            if let KernelObject::File(fd) = &**obj {
+                let fd = *fd;
+                unsafe extern "C" {
+                    fn close(fd: i32) -> i32;
+                }
+                unsafe {
+                    let _ = close(fd);
+                }
+            }
             *slot = None;
             return true;
         }

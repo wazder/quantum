@@ -24,14 +24,9 @@ pub extern "C-unwind" fn GetStdHandle(n_std_handle: u32) -> usize {
     }
 }
 
-/// `BOOL WriteFile(HANDLE, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
-///                  LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED)`
-///
-/// Multi-arg thunks need the JIT to lift more than the first Win64
-/// argument. We expose the function so the IAT resolver can see it; the
-/// JIT marshalling for it lands in a subsequent pass.
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn WriteFile(
+/// Stdio fast-path for WriteFile. The public `WriteFile` lives in
+/// `file_io` and delegates here for handles 0/1/2.
+pub extern "C-unwind" fn write_stdio(
     handle: usize,
     buffer: *const u8,
     count: u32,

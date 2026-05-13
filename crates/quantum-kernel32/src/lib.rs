@@ -8,6 +8,7 @@
 
 pub mod advapi32;
 pub mod d3d11;
+pub mod file_io;
 pub mod gdi32;
 pub mod handles;
 pub mod heap;

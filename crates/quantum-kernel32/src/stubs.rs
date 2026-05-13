@@ -652,45 +652,8 @@ pub extern "C" fn DeleteTimerQueueTimer(_queue: usize, _timer: usize, _event: us
 
 // =============== File I/O (mostly stubs, real work later) ===============
 
-#[unsafe(no_mangle)]
-pub extern "C" fn CreateFileA(
-    _name: *const i8,
-    _access: u32,
-    _share: u32,
-    _sa: *mut c_void,
-    _disp: u32,
-    _flags: u32,
-    _tmpl: usize,
-) -> usize {
-    usize::MAX // INVALID_HANDLE_VALUE
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn CreateFileW(
-    _name: *const u16,
-    _access: u32,
-    _share: u32,
-    _sa: *mut c_void,
-    _disp: u32,
-    _flags: u32,
-    _tmpl: usize,
-) -> usize {
-    usize::MAX
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn ReadFile(
-    _h: usize,
-    _buf: *mut c_void,
-    _bytes: u32,
-    bytes_read_out: *mut u32,
-    _ovl: *mut c_void,
-) -> i32 {
-    if !bytes_read_out.is_null() {
-        unsafe { *bytes_read_out = 0 };
-    }
-    0
-}
+// File I/O moved to crate::file_io (real fd-backed implementation).
+// stubs retained only for symbols file_io doesn't own.
 
 #[unsafe(no_mangle)]
 pub extern "C" fn FlushFileBuffers(_h: usize) -> i32 {
@@ -698,26 +661,8 @@ pub extern "C" fn FlushFileBuffers(_h: usize) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn SetFilePointer(_h: usize, _low: i32, _high: *mut i32, _method: u32) -> u32 {
-    0
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn SetFilePointerEx(_h: usize, _dist: i64, new_pos: *mut i64, _method: u32) -> i32 {
-    if !new_pos.is_null() {
-        unsafe { *new_pos = 0 };
-    }
-    1
-}
-
-#[unsafe(no_mangle)]
 pub extern "C" fn SetEndOfFile(_h: usize) -> i32 {
     1
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn GetFileSize(_h: usize, _high: *mut u32) -> u32 {
-    0
 }
 
 #[unsafe(no_mangle)]
