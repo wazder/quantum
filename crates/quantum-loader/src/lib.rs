@@ -32,6 +32,7 @@ pub mod reloc;
 pub mod resources;
 pub mod tls;
 
+pub use exports::{Export, ExportTable, ExportTarget, NamedExport};
 pub use image::{LoadedImage, MappedSection, load};
 pub use imports::{DllImports, ImportEntry, ImportTable};
 pub use pe::{PeFile, PeKind};

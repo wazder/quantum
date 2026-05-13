@@ -60,7 +60,175 @@ impl std::error::Error for RunError {}
 /// Run a guest PE from in-memory bytes. Returns the exit code the
 /// guest passed to `ExitProcess`, or `u32::MAX` if the guest returned
 /// without calling it.
+/// One side DLL loaded alongside the main EXE. We keep the parsed
+/// LoadedImage (whose memory backs the module's code/data) plus its
+/// ExportTable so the IAT resolver can look up functions in it.
+struct SideModule {
+    name: String,
+    image: LoadedImage,
+    exports: quantum_loader::ExportTable,
+}
+
+impl SideModule {
+    /// Resolve an export by name (or `"#NNN"` ordinal form) into the
+    /// absolute host address of the function inside this module.
+    /// Returns None if the export isn't found or is a forwarder.
+    fn resolve(&self, function: &str) -> Option<u64> {
+        if let Some(ord_str) = function.strip_prefix('#') {
+            let ord: u32 = ord_str.parse().ok()?;
+            let idx = ord.checked_sub(self.exports.ordinal_base)? as usize;
+            let entry = self.exports.entries.get(idx)?;
+            match &entry.target {
+                quantum_loader::ExportTarget::Rva(rva) => {
+                    Some(self.image.actual_base + *rva as u64)
+                }
+                quantum_loader::ExportTarget::Forwarded(_) => None,
+            }
+        } else {
+            let named = self.exports.names.iter().find(|n| n.name == function)?;
+            let idx = named.ordinal as usize;
+            let entry = self.exports.entries.get(idx)?;
+            match &entry.target {
+                quantum_loader::ExportTarget::Rva(rva) => {
+                    Some(self.image.actual_base + *rva as u64)
+                }
+                quantum_loader::ExportTarget::Forwarded(_) => None,
+            }
+        }
+    }
+}
+
+/// Load and prepare every DLL the main image imports (that we don't
+/// already stub) from `dll_dir`. Returns the list of side modules so
+/// the caller can route IAT lookups through them.
+fn load_side_dlls(
+    main: &quantum_loader::ImportTable,
+    dll_dir: &std::path::Path,
+    mem: &MachVmManager,
+    trace: bool,
+) -> Vec<SideModule> {
+    let mut out: Vec<SideModule> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut work: Vec<String> = main
+        .dlls
+        .iter()
+        .map(|d| d.name.to_ascii_lowercase())
+        .collect();
+
+    while let Some(dll_name) = work.pop() {
+        if !seen.insert(dll_name.clone()) {
+            continue;
+        }
+        // Skip DLLs we already have a built-in resolver for.
+        if has_builtin(&dll_name) {
+            continue;
+        }
+        let path = dll_dir.join(&dll_name);
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => {
+                if trace {
+                    eprintln!("[trace] side-dll: {dll_name} not found at {path:?}");
+                }
+                continue;
+            }
+        };
+        let pe = match PeFile::parse(&bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                if trace {
+                    eprintln!("[trace] side-dll: {dll_name} parse failed: {e}");
+                }
+                continue;
+            }
+        };
+        let mut image = match load(&pe, mem) {
+            Ok(i) => i,
+            Err(e) => {
+                if trace {
+                    eprintln!("[trace] side-dll: {dll_name} map failed: {e}");
+                }
+                continue;
+            }
+        };
+        if let Err(e) = apply_relocations(&mut image) {
+            if trace {
+                eprintln!("[trace] side-dll: {dll_name} reloc failed: {e}");
+            }
+            continue;
+        }
+        let exports = match quantum_loader::exports::parse(&image) {
+            Ok(Some(t)) => t,
+            _ => {
+                if trace {
+                    eprintln!("[trace] side-dll: {dll_name} has no exports");
+                }
+                continue;
+            }
+        };
+        // Also queue this DLL's own imports for loading.
+        if let Ok(sub_imp) = imports::parse(&image) {
+            for d in &sub_imp.dlls {
+                let lc = d.name.to_ascii_lowercase();
+                if !seen.contains(&lc) {
+                    work.push(lc);
+                }
+            }
+        }
+        if trace {
+            eprintln!(
+                "[trace] side-dll: loaded {dll_name} @ {:#x} ({} exports)",
+                image.actual_base,
+                exports.entries.len()
+            );
+        }
+        out.push(SideModule {
+            name: dll_name,
+            image,
+            exports,
+        });
+    }
+    out
+}
+
+/// True if `resolve()` in quantum-kernel32 recognises this DLL — i.e.
+/// we have a built-in stub set and shouldn't try to side-load it.
+fn has_builtin(dll: &str) -> bool {
+    matches!(
+        dll,
+        "kernel32.dll"
+            | "kernelbase.dll"
+            | "user32.dll"
+            | "gdi32.dll"
+            | "advapi32.dll"
+            | "winmm.dll"
+            | "shell32.dll"
+            | "ole32.dll"
+            | "oleaut32.dll"
+            | "imm32.dll"
+            | "crypt32.dll"
+            | "dinput8.dll"
+            | "xinput1_3.dll"
+            | "wldap32.dll"
+            | "ws2_32.dll"
+            | "dxgi.dll"
+            | "d3d11.dll"
+            | "d3d9.dll"
+            | "d3dx11_43.dll"
+            | "d3dcompiler_43.dll"
+            | "steam_api64.dll"
+            | "ntdll.dll"
+    )
+}
+
+#[allow(dead_code)]
 pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
+    run_pe_with_dir(bytes, std::env::current_dir().ok().as_deref())
+}
+
+/// Variant that takes a directory used to discover bundled side DLLs
+/// alongside the main executable.
+pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Result<u32, RunError> {
     let trace = std::env::var("QUANTUM_TRACE").is_ok();
     if trace {
         eprintln!("[trace] parsing PE ({} bytes)", bytes.len());
@@ -82,6 +250,33 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
     }
     apply_relocations(&mut image).map_err(RunError::Reloc)?;
     let imp = imports::parse(&image).map_err(RunError::Imports)?;
+
+    // Discover and load any DLLs the main image imports that we don't
+    // have built-in stubs for. fmodex / bink / oo2core etc. live next
+    // to the main EXE; we map them into the same VM and tap their
+    // exports.
+    let side_modules = if let Some(dir) = dll_dir {
+        load_side_dlls(&imp, dir, &mem, trace)
+    } else {
+        Vec::new()
+    };
+
+    let resolver = |dll: &str, function: &str| -> Option<u64> {
+        if let Some(addr) = resolve(dll, function) {
+            return Some(addr);
+        }
+        // Fall back to side modules (loaded fmodex / bink / etc).
+        let lc = dll.to_ascii_lowercase();
+        for sm in &side_modules {
+            if sm.name == lc
+                && let Some(addr) = sm.resolve(function)
+            {
+                return Some(addr);
+            }
+        }
+        None
+    };
+
     if trace {
         let mut unresolved = 0;
         for dll in &imp.dlls {
@@ -90,7 +285,7 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
                     quantum_loader::ImportEntry::Name { name, .. } => name.clone(),
                     quantum_loader::ImportEntry::Ordinal { ordinal, .. } => format!("#{ordinal}"),
                 };
-                if resolve(&dll.name, &n).is_none() {
+                if resolver(&dll.name, &n).is_none() {
                     unresolved += 1;
                 }
             }
@@ -101,7 +296,7 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
             unresolved,
         );
     }
-    imports::wire_iat(&mut image, &imp, resolve).map_err(RunError::WireIat)?;
+    imports::wire_iat(&mut image, &imp, resolver).map_err(RunError::WireIat)?;
 
     // Parse .pdata once. Static SEH dispatch (after the vectored
     // handler path fails) walks this to find a handler covering the

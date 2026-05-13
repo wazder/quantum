@@ -64,7 +64,8 @@ fn cmd_run(path: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    match process::run_pe(&bytes) {
+    let dir = std::path::Path::new(path).parent();
+    match process::run_pe_with_dir(&bytes, dir) {
         Ok(code) => ExitCode::from((code & 0xFF) as u8),
         Err(e) => {
             eprintln!("quantum: {e}");
