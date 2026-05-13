@@ -101,6 +101,65 @@ extern "C" fn host_double(x: u64) -> u64 {
 static mut HOST_THUNK_SLOT: u64 = 0;
 
 #[test]
+fn and_or_test_setnz_movzx_chain() {
+    // mov eax, 0x100       ; B8 00 01 00 00
+    // sub eax, 1            ; 83 E8 01           -> eax = 0xFF, ZF=0
+    // test eax, eax         ; 85 C0              -> ZF=0 (eax!=0)
+    // setnz cl              ; 0F 95 C1           -> cl = 1
+    // movzx eax, cl         ; 0F B6 C1           -> eax = 1
+    // ret                   ; C3
+    let bytes = [
+        0xB8, 0x00, 0x01, 0x00, 0x00, // mov eax, 0x100
+        0x83, 0xE8, 0x01, // sub eax, 1
+        0x85, 0xC0, // test eax, eax
+        0x0F, 0x95, 0xC1, // setnz cl
+        0x0F, 0xB6, 0xC1, // movzx eax, cl
+        0xC3, // ret
+    ];
+    assert_eq!(run_returns_u64(&bytes), 1);
+}
+
+#[test]
+fn and_or_inc_dec_chain() {
+    // mov eax, 0xFF         ; B8 FF 00 00 00     -> eax = 0xFF
+    // mov ebx, 0x0F         ; BB 0F 00 00 00     -> ebx = 0x0F
+    // and eax, ebx          ; 21 D8              -> eax = 0x0F
+    // inc eax               ; FF C0              -> eax = 0x10
+    // dec ebx               ; FF CB              -> ebx = 0x0E
+    // or eax, ebx           ; 09 D8              -> eax = 0x1E
+    // ret                   ; C3
+    let bytes = [
+        0xB8, 0xFF, 0x00, 0x00, 0x00, // mov eax, 0xFF
+        0xBB, 0x0F, 0x00, 0x00, 0x00, // mov ebx, 0x0F
+        0x21, 0xD8, // and eax, ebx
+        0xFF, 0xC0, // inc eax
+        0xFF, 0xCB, // dec ebx
+        0x09, 0xD8, // or eax, ebx
+        0xC3,
+    ];
+    assert_eq!(run_returns_u64(&bytes), 0x1E);
+}
+
+#[test]
+fn cmov_picks_branch_on_flag() {
+    // mov eax, 11           ; B8 0B 00 00 00
+    // mov ebx, 22           ; BB 16 00 00 00
+    // mov ecx, 99           ; B9 63 00 00 00
+    // cmp eax, ebx          ; 39 D8         -> eax < ebx, ZF=0, SF≠OF so signed-less
+    // cmovl eax, ecx        ; 0F 4C C1     -> eax = ecx = 99
+    // ret
+    let bytes = [
+        0xB8, 0x0B, 0x00, 0x00, 0x00, // mov eax, 11
+        0xBB, 0x16, 0x00, 0x00, 0x00, // mov ebx, 22
+        0xB9, 0x63, 0x00, 0x00, 0x00, // mov ecx, 99
+        0x39, 0xD8, // cmp eax, ebx (32-bit; CMP eax,ebx encoding uses opcode 39 r/m,r)
+        0x0F, 0x4C, 0xC1, // cmovl eax, ecx
+        0xC3,
+    ];
+    assert_eq!(run_returns_u64(&bytes), 99);
+}
+
+#[test]
 fn call_indirect_through_iat_slot() {
     // SAFETY: written once before any concurrent reader.
     unsafe {
