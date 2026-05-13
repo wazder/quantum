@@ -46,6 +46,25 @@ impl GuestStack {
         self.region.base() as u64
     }
 
+    /// Set up the initial RSP for a Win64 entry. The OS "calls" the
+    /// program's entry point, which means at entry RSP must be 8-byte
+    /// misaligned (the would-be return address sits one slot above).
+    ///
+    /// We write `sentinel` into that slot so a clean `RET` from the
+    /// guest's entry function exits the dispatcher loop cleanly
+    /// (rather than reading uninitialised memory above the stack).
+    /// The returned value is what to put in `ctx.gprs[4]` (guest RSP).
+    pub fn entry_rsp(&self, sentinel: u64) -> u64 {
+        let top = self.top();
+        let new_rsp = top - 8;
+        // SAFETY: we're writing one u64 into the top slot of our own
+        // owned region.
+        unsafe {
+            (new_rsp as *mut u64).write(sentinel);
+        }
+        new_rsp
+    }
+
     pub fn len(&self) -> usize {
         self.region.len()
     }

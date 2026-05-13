@@ -60,7 +60,11 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
 
     let stack = GuestStack::default_size().map_err(RunError::Stack)?;
     let mut ctx = GuestContext::default();
-    ctx.gprs[4] = stack.top();
+    // Win64 entry contract: RSP is 8-byte misaligned at the moment
+    // the entry receives control, with the return address sitting one
+    // slot above. We seed STOP_SENTINEL as that fake return so a
+    // clean entry-point RET exits the dispatcher cleanly.
+    ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
 
     let mut disp = Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?;
     let entry_va = image.actual_base + image.entry_rva as u64;
