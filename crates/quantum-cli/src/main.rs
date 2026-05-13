@@ -11,7 +11,8 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-use quantum_loader::{PeFile, PeKind};
+use quantum_loader::{ImportEntry, PeFile, PeKind, apply_relocations, imports as imp, load};
+use quantum_runtime::MachVmManager;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -27,6 +28,13 @@ fn main() -> ExitCode {
             Some(path) => cmd_dump(path),
             None => {
                 eprintln!("usage: quantum dump <path-to.exe>");
+                ExitCode::from(2)
+            }
+        },
+        Some("imports") => match args.get(2) {
+            Some(path) => cmd_imports(path),
+            None => {
+                eprintln!("usage: quantum imports <path-to.exe>");
                 ExitCode::from(2)
             }
         },
@@ -54,6 +62,53 @@ fn cmd_run(path: &str) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn cmd_imports(path: &str) -> ExitCode {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read {path}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let pe = match PeFile::parse(&bytes) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("parse: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mem = MachVmManager::new();
+    let mut image = match load(&pe, &mem) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("load: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let _ = apply_relocations(&mut image);
+    let table = match imp::parse(&image) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("imports: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut total = 0usize;
+    for dll in &table.dlls {
+        println!("{} ({} entries)", dll.name, dll.entries.len());
+        for entry in &dll.entries {
+            match entry {
+                ImportEntry::Name { name, .. } => println!("  {name}"),
+                ImportEntry::Ordinal { ordinal, .. } => println!("  #{ordinal}"),
+            }
+            total += 1;
+        }
+    }
+    println!("---");
+    println!("{} DLLs, {} total imports", table.dlls.len(), total);
+    ExitCode::SUCCESS
 }
 
 fn cmd_dump(path: &str) -> ExitCode {
