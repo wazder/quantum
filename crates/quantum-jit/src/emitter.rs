@@ -179,6 +179,14 @@ impl Emitter {
         self.code.push(word);
     }
 
+    /// Append a raw instruction word. Escape hatch for callers that
+    /// hand-encode opcodes we haven't yet added a typed helper for. Use
+    /// sparingly; everything in production should go through a typed
+    /// encoder so the bit layout stays under test.
+    pub fn raw_word(&mut self, word: u32) {
+        self.push(word);
+    }
+
     /// Emit an unfinished branch: store the raw opcode bits with zeroed
     /// offset and record a fixup for the label.
     fn emit_branch(&mut self, base_word: u32, kind: FixupKind, label: Label) {

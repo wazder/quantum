@@ -1,0 +1,5 @@
+# Custom test runner re-signs every test binary with the JIT entitlement
+# before exec'ing it, so MAP_JIT pages can be made executable at runtime.
+# See scripts/test-runner.sh and build/jit.entitlements.
+[target.aarch64-apple-darwin]
+runner = "scripts/test-runner.sh"

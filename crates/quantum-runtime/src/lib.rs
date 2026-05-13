@@ -9,10 +9,12 @@
 
 extern crate alloc;
 
+pub mod codecache;
 pub mod fd;
 pub mod mem;
 pub mod sys;
 pub mod thread;
 
+pub use codecache::CodeCache;
 pub use fd::{HostFd, OpenFlags, StdStream};
 pub use mem::{MachVmManager, MemoryManager, Protection, Region};

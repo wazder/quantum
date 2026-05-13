@@ -19,6 +19,7 @@ name = "quantum-jit"
 version = "0.0.1"
 dependencies = [
  "quantum-core",
+ "quantum-runtime",
 ]
 
 [[package]]

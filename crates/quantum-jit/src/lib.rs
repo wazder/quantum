@@ -15,5 +15,6 @@ extern crate alloc;
 pub mod decoder;
 pub mod emitter;
 pub mod iform;
+pub mod lifter;
 
 pub use iform::{Cond, GpReg, Inst, Mem, Op, OpSize, Operand, Seg};
