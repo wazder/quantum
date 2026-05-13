@@ -231,6 +231,12 @@ pub enum Op {
     PsubQ,
     PaddD,
     PsubD,
+    /// Packed FP arithmetic. The OpSize carried on the XMM operand is
+    /// B4 for single (4x32) lanes or B8 for double (2x64) lanes.
+    AddPacked,
+    SubPacked,
+    MulPacked,
+    DivPacked,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

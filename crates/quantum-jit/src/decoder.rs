@@ -822,6 +822,30 @@ impl<'a> Decoder<'a> {
                 };
                 Ok(make(op, [Some(xmm), Some(rm), None], rip))
             }
+            // Packed FP arith — same opcodes as scalar (58/59/5C/5E) but
+            // *without* a REPE/REPNE prefix. OSIZE (66) selects double
+            // (2-lane), no prefix selects single (4-lane).
+            //   NP  0F 58 /r  ADDPS
+            //   66  0F 58 /r  ADDPD
+            //   NP  0F 59 /r  MULPS
+            //   66  0F 59 /r  MULPD
+            //   NP  0F 5C /r  SUBPS
+            //   66  0F 5C /r  SUBPD
+            //   NP  0F 5E /r  DIVPS
+            //   66  0F 5E /r  DIVPD
+            0x58 | 0x59 | 0x5C | 0x5E if !p.repne && !p.repe => {
+                let size = if p.osize { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                let op = match opcode {
+                    0x58 => Op::AddPacked,
+                    0x59 => Op::MulPacked,
+                    0x5C => Op::SubPacked,
+                    0x5E => Op::DivPacked,
+                    _ => unreachable!(),
+                };
+                Ok(make(op, [Some(xmm), Some(rm), None], rip))
+            }
             // FP <-> int / FP <-> FP precision conversions.
             //   F2 0F 2A /r CVTSI2SD xmm, r/m{32,64}
             //   F3 0F 2A /r CVTSI2SS xmm, r/m{32,64}
@@ -1682,6 +1706,24 @@ mod tests {
         let i = dec(&[0x66, 0x0F, 0xFA, 0x04, 0x24]);
         assert_eq!(i.op, Op::PsubD);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+    }
+
+    #[test]
+    fn addps_xmm_xmm() {
+        // 0F 58 C1 -> addps xmm0, xmm1
+        let i = dec(&[0x0F, 0x58, 0xC1]);
+        assert_eq!(i.op, Op::AddPacked);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
+    }
+
+    #[test]
+    fn mulpd_xmm_xmm() {
+        // 66 0F 59 C1 -> mulpd xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x59, 0xC1]);
+        assert_eq!(i.op, Op::MulPacked);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
     }
 
     #[test]

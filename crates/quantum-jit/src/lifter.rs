@@ -148,6 +148,10 @@ impl<'a> Lifter<'a> {
             Op::PsubQ => self.lift_packed_arith(inst, PackedArith::SubQ),
             Op::PaddD => self.lift_packed_arith(inst, PackedArith::AddD),
             Op::PsubD => self.lift_packed_arith(inst, PackedArith::SubD),
+            Op::AddPacked => self.lift_packed_fp(inst, FpPackedOp::Add),
+            Op::SubPacked => self.lift_packed_fp(inst, FpPackedOp::Sub),
+            Op::MulPacked => self.lift_packed_fp(inst, FpPackedOp::Mul),
+            Op::DivPacked => self.lift_packed_fp(inst, FpPackedOp::Div),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1280,6 +1284,47 @@ impl<'a> Lifter<'a> {
         Ok(())
     }
 
+    /// ADDPS/SUBPS/MULPS/DIVPS (B4 = 4-lane single) and PD variants
+    /// (B8 = 2-lane double). Load both XMM operands into NEON Q-regs
+    /// at the right lane shape, apply the FP op, store back.
+    fn lift_packed_fp(&mut self, inst: &Inst, op: FpPackedOp) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (dst_idx, size) = match dst {
+            Operand::XmmReg(d, s) => (d, s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        match (op, size) {
+            (FpPackedOp::Add, OpSize::B4) => self.emitter.fadd_v4s(dst_v, dst_v, src_v),
+            (FpPackedOp::Add, OpSize::B8) => self.emitter.fadd_v2d(dst_v, dst_v, src_v),
+            (FpPackedOp::Sub, OpSize::B4) => self.emitter.fsub_v4s(dst_v, dst_v, src_v),
+            (FpPackedOp::Sub, OpSize::B8) => self.emitter.fsub_v2d(dst_v, dst_v, src_v),
+            (FpPackedOp::Mul, OpSize::B4) => self.emitter.fmul_v4s(dst_v, dst_v, src_v),
+            (FpPackedOp::Mul, OpSize::B8) => self.emitter.fmul_v2d(dst_v, dst_v, src_v),
+            (FpPackedOp::Div, OpSize::B4) => self.emitter.fdiv_v4s(dst_v, dst_v, src_v),
+            (FpPackedOp::Div, OpSize::B8) => self.emitter.fdiv_v2d(dst_v, dst_v, src_v),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        Ok(())
+    }
+
     /// BSWAP r — byte-reverse a register. NEON REV X (or REV W for B4).
     /// REX.W picks the width; without it BSWAP operates on the 32-bit
     /// view, which AArch64's REV W gives us exactly (zero-extending
@@ -2400,6 +2445,14 @@ enum PackedArith {
     AddD,
     /// 4-lane 32-bit sub (PSUBD).
     SubD,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FpPackedOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 #[derive(Debug, Clone, Copy)]

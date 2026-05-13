@@ -874,6 +874,60 @@ impl Emitter {
         let w = 0x6EA0_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+
+    // Packed FP arith — three-same FP NEON.
+    //   0_Q_U_01110_sz_1_Rm_opcode_1_Rn_Rd
+    // For 4S (single): Q=1, U=0, sz=00, opcode=11010 (ADD)
+    // Tables:
+    //   FADD 4S: 0x4E20_D400
+    //   FADD 2D: 0x4E60_D400
+    //   FSUB 4S: 0x4EA0_D400
+    //   FSUB 2D: 0x4EE0_D400
+    //   FMUL 4S: 0x6E20_DC00
+    //   FMUL 2D: 0x6E60_DC00
+    //   FDIV 4S: 0x6E20_FC00
+    //   FDIV 2D: 0x6E60_FC00
+
+    /// FADD Vd.4S, Vn.4S, Vm.4S — 4-lane single add.
+    pub fn fadd_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4E20_D400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FADD Vd.2D, Vn.2D, Vm.2D — 2-lane double add.
+    pub fn fadd_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4E60_D400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FSUB Vd.4S, Vn.4S, Vm.4S.
+    pub fn fsub_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4EA0_D400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FSUB Vd.2D, Vn.2D, Vm.2D.
+    pub fn fsub_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4EE0_D400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FMUL Vd.4S, Vn.4S, Vm.4S.
+    pub fn fmul_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E20_DC00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FMUL Vd.2D, Vn.2D, Vm.2D.
+    pub fn fmul_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E60_DC00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FDIV Vd.4S, Vn.4S, Vm.4S.
+    pub fn fdiv_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E20_FC00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// FDIV Vd.2D, Vn.2D, Vm.2D.
+    pub fn fdiv_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E60_FC00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============
