@@ -787,8 +787,10 @@ impl<'a> Decoder<'a> {
             // 66 0F 71/72/73 — packed shift immediate group (PSLLW/D/Q
             // PSRLW/D/Q PSRAW/D). The ModRM /sub field picks the op:
             //   /2 PSRL*
+            //   /3 PSRLDQ (only for 73 — shift WHOLE 128-bit reg right by imm8 bytes)
             //   /4 PSRA*  (only for W and D — there is no PSRAQ)
             //   /6 PSLL*
+            //   /7 PSLLDQ (only for 73)
             // 71 -> word lanes, 72 -> dword lanes, 73 -> qword lanes.
             0x71..=0x73 if p.osize => {
                 let lane = match opcode {
@@ -802,9 +804,6 @@ impl<'a> Decoder<'a> {
                 let sub = (modrm >> 3) & 0b111;
                 let rm = modrm & 0b111;
                 if mod_ != 0b11 {
-                    // Memory operand isn't valid for the immediate-shift
-                    // form; only register operand is. Bail with Unhandled
-                    // so the caller can advance.
                     return Ok(unhandled(rip));
                 }
                 let r = ((p.rex.b as u8) << 3) | rm;
@@ -812,8 +811,10 @@ impl<'a> Decoder<'a> {
                 let imm = self.read_u8()? as i64;
                 let op = match (sub, lane) {
                     (2, _) => Op::PsrlImm(lane),
+                    (3, OpSize::B8) => Op::PsrldqImm,
                     (4, OpSize::B2) | (4, OpSize::B4) => Op::PsraImm(lane),
                     (6, _) => Op::PsllImm(lane),
+                    (7, OpSize::B8) => Op::PslldqImm,
                     _ => return Ok(unhandled(rip)),
                 };
                 Ok(make(
@@ -821,6 +822,12 @@ impl<'a> Decoder<'a> {
                     [Some(xmm), Some(Operand::Imm(imm, OpSize::B1)), None],
                     rip,
                 ))
+            }
+            // 66 0F D5 /r PMULLW — 8-lane 16-bit multiply (low 16).
+            0xD5 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PmullW, [Some(xmm), Some(rm), None], rip))
             }
             // 66 0F 70 /r ib  PSHUFD xmm, xmm/m128, imm8
             0x70 if p.osize => {
@@ -1863,6 +1870,28 @@ mod tests {
         // 66 0F 71 E0 03 -> psraw xmm0, 3
         let i = dec(&[0x66, 0x0F, 0x71, 0xE0, 0x03]);
         assert_eq!(i.op, Op::PsraImm(OpSize::B2));
+    }
+
+    #[test]
+    fn pmullw_xmm_xmm() {
+        // 66 0F D5 C1 -> pmullw xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0xD5, 0xC1]);
+        assert_eq!(i.op, Op::PmullW);
+    }
+
+    #[test]
+    fn pslldq_xmm_imm() {
+        // 66 0F 73 F8 02 -> pslldq xmm0, 2  (modrm = 11_111_000 -> sub=7, rm=0)
+        let i = dec(&[0x66, 0x0F, 0x73, 0xF8, 0x02]);
+        assert_eq!(i.op, Op::PslldqImm);
+        assert_eq!(i.operands[1], Some(Operand::Imm(2, OpSize::B1)));
+    }
+
+    #[test]
+    fn psrldq_xmm_imm() {
+        // 66 0F 73 D8 04 -> psrldq xmm0, 4  (modrm = 11_011_000 -> sub=3, rm=0)
+        let i = dec(&[0x66, 0x0F, 0x73, 0xD8, 0x04]);
+        assert_eq!(i.op, Op::PsrldqImm);
     }
 
     #[test]

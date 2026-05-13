@@ -1050,6 +1050,24 @@ impl Emitter {
         let w = 0x6E00_0400 | (imm5 << 16) | (imm4 << 11) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+
+    /// MUL Vd.8H, Vn.8H, Vm.8H — 8-lane 16-bit multiply (low half of product).
+    pub fn mul_v8h(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4E60_9C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// EXT Vd.16B, Vn.16B, Vm.16B, #imm — concatenate Vn:Vm and extract
+    /// 16 bytes starting at offset `imm` from the low end.
+    pub fn ext_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg, imm: u32) {
+        debug_assert!(imm < 16);
+        let w = 0x6E00_0000
+            | ((vm.0 as u32) << 16)
+            | (imm << 11)
+            | ((vn.0 as u32) << 5)
+            | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============

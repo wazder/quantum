@@ -254,6 +254,12 @@ pub enum Op {
     /// PSHUFD xmm, xmm/m128, imm8 — shuffle 4 32-bit lanes according
     /// to the immediate.
     PshufD,
+    /// PMULLW — packed 16-bit multiply low (8 lanes * 16 bits, keep low 16).
+    PmullW,
+    /// PSLLDQ imm8 — shift the whole 128-bit register left by imm8 bytes.
+    PslldqImm,
+    /// PSRLDQ imm8 — shift the whole 128-bit register right by imm8 bytes.
+    PsrldqImm,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

@@ -161,6 +161,9 @@ impl<'a> Lifter<'a> {
             Op::PsrlImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Srl),
             Op::PsraImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Sra),
             Op::PshufD => self.lift_pshufd(inst),
+            Op::PmullW => self.lift_pmullw(inst),
+            Op::PslldqImm => self.lift_pshift_dq(inst, true),
+            Op::PsrldqImm => self.lift_pshift_dq(inst, false),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1290,6 +1293,76 @@ impl<'a> Lifter<'a> {
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
+        Ok(())
+    }
+
+    /// PMULLW — 8-lane 16-bit multiply, low 16 bits. NEON MUL Vd.8H.
+    fn lift_pmullw(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(Op::PmullW)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(Op::PmullW)),
+        }
+        self.emitter.mul_v8h(dst_v, dst_v, src_v);
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        Ok(())
+    }
+
+    /// PSLLDQ / PSRLDQ imm — byte-shift the whole 128-bit register.
+    /// Lowered via EXT with a zeroed scratch vector.
+    ///   PSLLDQ N: result bytes [N..15] = src[0..15-N], low N bytes = 0.
+    ///     -> EXT Vd.16B, Vzero.16B, Vsrc.16B, #(16 - N)
+    ///   PSRLDQ N: result bytes [0..15-N] = src[N..15], high N bytes = 0.
+    ///     -> EXT Vd.16B, Vsrc.16B, Vzero.16B, #N
+    /// Shift >=16 zeros the destination (per x86 spec).
+    fn lift_pshift_dq(&mut self, inst: &Inst, left: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let imm = match inst.operands[1] {
+            Some(Operand::Imm(v, _)) => v as u32,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let src_v = Reg::x(16);
+        let zero_v = Reg::x(17);
+        // Load source.
+        self.emitter
+            .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        // Build zero in V17.
+        self.emitter.eor_v16b(zero_v, zero_v, zero_v);
+        if imm == 0 {
+            // No-op, but store back is harmless.
+        } else if imm >= 16 {
+            // Result is zero.
+            self.emitter.eor_v16b(src_v, src_v, src_v);
+        } else if left {
+            // bytes [imm..15] = src[0..15-imm]; low imm = 0.
+            self.emitter.ext_v16b(src_v, zero_v, src_v, 16 - imm);
+        } else {
+            // bytes [0..15-imm] = src[imm..15]; high imm = 0.
+            self.emitter.ext_v16b(src_v, src_v, zero_v, imm);
+        }
+        self.emitter
+            .str_q(src_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
         Ok(())
     }
 
