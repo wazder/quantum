@@ -143,6 +143,11 @@ impl<'a> Lifter<'a> {
             Op::SqrtScalar => self.lift_sqrt_scalar(inst),
             Op::Cmpxchg => self.lift_cmpxchg(inst),
             Op::Xadd => self.lift_xadd(inst),
+            Op::Bswap => self.lift_bswap(inst),
+            Op::PaddQ => self.lift_packed_arith(inst, PackedArith::AddQ),
+            Op::PsubQ => self.lift_packed_arith(inst, PackedArith::SubQ),
+            Op::PaddD => self.lift_packed_arith(inst, PackedArith::AddD),
+            Op::PsubD => self.lift_packed_arith(inst, PackedArith::SubD),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1275,6 +1280,60 @@ impl<'a> Lifter<'a> {
         Ok(())
     }
 
+    /// BSWAP r — byte-reverse a register. NEON REV X (or REV W for B4).
+    /// REX.W picks the width; without it BSWAP operates on the 32-bit
+    /// view, which AArch64's REV W gives us exactly (zero-extending
+    /// into the X register naturally).
+    fn lift_bswap(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let (rd, size) = match dst {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(Op::Bswap)),
+        };
+        match size {
+            OpSize::B8 => self.emitter.rev_x(rd, rd),
+            OpSize::B4 => self.emitter.rev_w(rd, rd),
+            _ => return Err(LifterError::Unsupported(Op::Bswap)),
+        }
+        Ok(())
+    }
+
+    /// PADDQ / PSUBQ / PADDD / PSUBD — 128-bit packed integer add/sub.
+    /// Load both XMM operands into NEON Q-regs, run ADD/SUB on the
+    /// 2D or 4S lane shape, store back.
+    fn lift_packed_arith(&mut self, inst: &Inst, op: PackedArith) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        match op {
+            PackedArith::AddQ => self.emitter.add_v2d(dst_v, dst_v, src_v),
+            PackedArith::SubQ => self.emitter.sub_v2d(dst_v, dst_v, src_v),
+            PackedArith::AddD => self.emitter.add_v4s(dst_v, dst_v, src_v),
+            PackedArith::SubD => self.emitter.sub_v4s(dst_v, dst_v, src_v),
+        }
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        Ok(())
+    }
+
     /// CMPXCHG r/m, r — Win64 spec:
     ///   tmp = *r/m
     ///   if RAX == tmp: *r/m = src,  ZF=1
@@ -2329,6 +2388,18 @@ enum PackedLogic {
     Xor,
     And,
     Or,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PackedArith {
+    /// 2-lane 64-bit add (PADDQ).
+    AddQ,
+    /// 2-lane 64-bit sub (PSUBQ).
+    SubQ,
+    /// 4-lane 32-bit add (PADDD).
+    AddD,
+    /// 4-lane 32-bit sub (PSUBD).
+    SubD,
 }
 
 #[derive(Debug, Clone, Copy)]

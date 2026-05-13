@@ -222,6 +222,15 @@ pub enum Op {
     MaxScalar,
     /// SQRTSS / SQRTSD — scalar FP square root.
     SqrtScalar,
+    /// BSWAP r — byte-swap a 32 or 64-bit register (network byte order
+    /// conversion). Operand carries the width.
+    Bswap,
+    /// PADDQ / PSUBQ / PADDD / PSUBD — packed integer add/sub.
+    /// The Op variants encode width: ..Q for 64-bit lanes, ..D for 32.
+    PaddQ,
+    PsubQ,
+    PaddD,
+    PsubD,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

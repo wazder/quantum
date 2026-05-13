@@ -835,6 +835,45 @@ impl Emitter {
     pub fn fsqrt_d(&mut self, vd: Reg, vn: Reg) {
         self.fp_cvt(0x1E61_C000, vd, vn);
     }
+
+    // Data-processing 1-source ops (REV / RBIT / CLZ live in this family;
+    // we expose the byte-reverse variants the BSWAP lift needs).
+    fn dp1src(&mut self, base: u32, rd: Reg, rn: Reg) {
+        let w = base | ((rn.0 as u32) << 5) | (rd.0 as u32);
+        self.push(w);
+    }
+    /// REV Xd, Xn — reverse 64-bit byte order.
+    pub fn rev_x(&mut self, rd: Reg, rn: Reg) {
+        self.dp1src(0xDAC0_0C00, rd, rn);
+    }
+    /// REV Wd, Wn — reverse 32-bit byte order.
+    pub fn rev_w(&mut self, rd: Reg, rn: Reg) {
+        self.dp1src(0x5AC0_0800, rd, rn);
+    }
+
+    // NEON packed integer ADD/SUB on 2D (64-bit lanes) and 4S (32-bit
+    // lanes) vectors. Three-same format: 0_Q_U_01110_size_1_Rm_10000_1_Rn_Rd.
+    // U=0 ADD, U=1 SUB; size selects lane width.
+    /// ADD Vd.2D, Vn.2D, Vm.2D — 2x64-bit lane add.
+    pub fn add_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4EE0_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SUB Vd.2D, Vn.2D, Vm.2D.
+    pub fn sub_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6EE0_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// ADD Vd.4S, Vn.4S, Vm.4S — 4x32-bit lane add.
+    pub fn add_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4EA0_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SUB Vd.4S, Vn.4S, Vm.4S.
+    pub fn sub_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6EA0_8400 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============

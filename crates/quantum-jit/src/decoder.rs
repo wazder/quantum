@@ -1022,6 +1022,36 @@ impl<'a> Decoder<'a> {
                 let r = self.reg_operand(p, reg, size);
                 Ok(make(Op::Xadd, [Some(rm), Some(r), None], rip))
             }
+            // 0F C8 + reg-low3 — BSWAP r32/r64.
+            0xC8..=0xCF => {
+                let size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let r = self.opcode_reg_operand(p, opcode - 0xC8, size);
+                Ok(make(Op::Bswap, [Some(r), None, None], rip))
+            }
+            // 66 0F D4 /r PADDQ — 2x64-bit packed add.
+            0xD4 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PaddQ, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F FB /r PSUBQ.
+            0xFB if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PsubQ, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F FE /r PADDD — 4x32-bit packed add.
+            0xFE if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PaddD, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F FA /r PSUBD.
+            0xFA if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PsubD, [Some(xmm), Some(rm), None], rip))
+            }
             _ => Ok(unhandled(rip)),
         }
     }
@@ -1619,6 +1649,39 @@ mod tests {
         assert_eq!(i.op, Op::CvtSsToSd);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
+    }
+
+    #[test]
+    fn bswap_eax() {
+        // 0F C8 -> bswap eax
+        let i = dec(&[0x0F, 0xC8]);
+        assert_eq!(i.op, Op::Bswap);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+    }
+
+    #[test]
+    fn bswap_rax() {
+        // 48 0F C8 -> bswap rax  (REX.W -> 64-bit)
+        let i = dec(&[0x48, 0x0F, 0xC8]);
+        assert_eq!(i.op, Op::Bswap);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B8)));
+    }
+
+    #[test]
+    fn paddq_xmm_xmm() {
+        // 66 0F D4 C1 -> paddq xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0xD4, 0xC1]);
+        assert_eq!(i.op, Op::PaddQ);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn psubd_xmm_mem() {
+        // 66 0F FA 04 24 -> psubd xmm0, [rsp]
+        let i = dec(&[0x66, 0x0F, 0xFA, 0x04, 0x24]);
+        assert_eq!(i.op, Op::PsubD);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
     }
 
     #[test]
