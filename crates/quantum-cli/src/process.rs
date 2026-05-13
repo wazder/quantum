@@ -103,6 +103,18 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
     }
     imports::wire_iat(&mut image, &imp, resolve).map_err(RunError::WireIat)?;
 
+    // Parse .pdata once. Static SEH dispatch (after the vectored
+    // handler path fails) walks this to find a handler covering the
+    // faulting RIP. 0 entries is fine — caller treats absence as
+    // "no handler, propagate".
+    let runtime_functions = quantum_loader::exception::parse(&image).map_err(RunError::Imports)?;
+    if trace {
+        eprintln!(
+            "[trace] .pdata: {} RUNTIME_FUNCTION entries",
+            runtime_functions.len()
+        );
+    }
+
     let stack = GuestStack::default_size().map_err(RunError::Stack)?;
     let mut ctx = GuestContext::default();
     ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
@@ -132,7 +144,14 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
             None => break,
         };
         last_crash = Some(crash);
-        if !dispatch_seh(&mut disp, &image, &mut ctx, &crash, trace) {
+        if !dispatch_seh(
+            &mut disp,
+            &image,
+            &mut ctx,
+            &crash,
+            &runtime_functions,
+            trace,
+        ) {
             break;
         }
         // A handler returned EXCEPTION_CONTINUE_EXECUTION. Resume the
@@ -196,6 +215,7 @@ fn dispatch_seh(
     image: &LoadedImage,
     ctx: &mut GuestContext,
     crash: &quantum_kernel32::process::CrashInfo,
+    runtime_functions: &[quantum_loader::exception::RuntimeFunction],
     trace: bool,
 ) -> bool {
     let exception_code = match crash.sig {
@@ -299,6 +319,64 @@ fn dispatch_seh(
             ctx.flags = flags;
             return true;
         }
+    }
+
+    // Static .pdata SEH: find the RUNTIME_FUNCTION covering the
+    // faulting RIP, resolve its UNWIND_INFO chain to the handler
+    // address, and call it with the full 4-arg Win64 SEH signature:
+    //   EXCEPTION_DISPOSITION (*)(EXCEPTION_RECORD*, PVOID, CONTEXT*, PVOID)
+    //
+    // Disposition values come from <excpt.h> EXCEPTION_DISPOSITION enum:
+    //   ExceptionContinueExecution = 0
+    //   ExceptionContinueSearch    = 1
+    //   ExceptionNestedException   = 2
+    //   ExceptionCollidedUnwind    = 3
+    let fault_rva = LAST_ENTERED_RIP
+        .load(Ordering::SeqCst)
+        .saturating_sub(image.actual_base) as u32;
+    if let Some(rf) =
+        quantum_loader::exception::lookup_runtime_function(runtime_functions, fault_rva)
+        && let Ok((ui, _source_rf)) = quantum_loader::exception::resolve_handler(image, rf)
+        && let Some(handler_rva) = ui.handler_rva
+    {
+        let handler_va = image.actual_base + handler_rva as u64;
+        if trace {
+            eprintln!("[trace] SEH: .pdata handler @ {handler_va:#x} for fault rva {fault_rva:#x}");
+        }
+        // Win64 ABI: RCX, RDX, R8, R9 = arg0..arg3.
+        //   arg0: EXCEPTION_RECORD*
+        //   arg1: EstablisherFrame (the RSP at the SEH frame establishment)
+        //   arg2: CONTEXT*
+        //   arg3: DispatcherContext* (we pass NULL — most C++ EH frames ignore it)
+        ctx.gprs[1] = &mut *record as *mut _ as u64;
+        ctx.gprs[2] = ctx.gprs[4]; // EstablisherFrame ≈ current RSP
+        ctx.gprs[8] = &mut *context as *mut _ as u64;
+        ctx.gprs[9] = 0;
+        let disposition = match invoke_guest_function(disp, image, ctx, handler_va) {
+            Ok(rax) => rax as i32,
+            Err(e) => {
+                if trace {
+                    eprintln!("[trace] SEH: .pdata handler errored: {e}");
+                }
+                return false;
+            }
+        };
+        if disposition == 0 {
+            // ExceptionContinueExecution.
+            if trace {
+                eprintln!(
+                    "[trace] SEH: .pdata handler returned ContinueExecution (new Rip={:#x})",
+                    context.rip
+                );
+            }
+            let (rip, flags) = context.into_guest_gprs(&mut ctx.gprs);
+            ctx.rip = rip;
+            ctx.flags = flags;
+            return true;
+        }
+        // ContinueSearch / NestedException / CollidedUnwind aren't
+        // walked further here — a real implementation would unwind
+        // and try the next frame's handler. We stop and propagate.
     }
 
     false
