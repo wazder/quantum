@@ -40,6 +40,14 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
         "TryEnterCriticalSection" => crate::sync::TryEnterCriticalSection as *const (),
         "SetLastError" => crate::sync::SetLastError as *const (),
         "GetLastError" => crate::sync::GetLastError as *const (),
+        "LoadLibraryA" => crate::modules::LoadLibraryA as *const (),
+        "LoadLibraryW" => crate::modules::LoadLibraryW as *const (),
+        "LoadLibraryExA" => crate::modules::LoadLibraryExA as *const (),
+        "LoadLibraryExW" => crate::modules::LoadLibraryExW as *const (),
+        "FreeLibrary" => crate::modules::FreeLibrary as *const (),
+        "GetModuleHandleA" => crate::modules::GetModuleHandleA as *const (),
+        "GetModuleHandleW" => crate::modules::GetModuleHandleW as *const (),
+        "GetProcAddress" => crate::modules::GetProcAddress as *const (),
         _ => return None,
     };
     Some(ptr as u64)
