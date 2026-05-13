@@ -157,6 +157,9 @@ impl<'a> Lifter<'a> {
             Op::MulPacked => self.lift_packed_fp(inst, FpPackedOp::Mul),
             Op::DivPacked => self.lift_packed_fp(inst, FpPackedOp::Div),
             Op::PcmpeqLane(lane) => self.lift_pcmpeq(inst, lane),
+            Op::PsllImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Sll),
+            Op::PsrlImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Srl),
+            Op::PsraImm(lane) => self.lift_pshift_imm(inst, lane, PShift::Sra),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1286,6 +1289,71 @@ impl<'a> Lifter<'a> {
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
+        Ok(())
+    }
+
+    /// PSLLW/D/Q PSRLW/D/Q PSRAW/D — packed shift by immediate. Loads
+    /// the XMM, applies the matching NEON immediate-shift form, stores
+    /// back. x86 silently zeroes the result when the shift count meets
+    /// or exceeds the element size; AArch64 disallows that encoding,
+    /// so we emit a zeroing path in that case.
+    fn lift_pshift_imm(&mut self, inst: &Inst, lane: OpSize, op: PShift) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let shift = match src {
+            Operand::Imm(v, _) => v as u32,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let lane_bits = match lane {
+            OpSize::B2 => 16,
+            OpSize::B4 => 32,
+            OpSize::B8 => 64,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        // x86 semantics: shift>=lane_bits zeroes the lane for logical
+        // shifts; arith right shift gives all-sign-bit (replicate sign).
+        if shift >= lane_bits {
+            match op {
+                PShift::Sra => {
+                    // Replicate sign bit: shift by (lane_bits-1) gives
+                    // all sign-fill.
+                    let shift = lane_bits - 1;
+                    match lane {
+                        OpSize::B2 => self.emitter.sshr_v8h(dst_v, dst_v, shift),
+                        OpSize::B4 => self.emitter.sshr_v4s(dst_v, dst_v, shift),
+                        _ => return Err(LifterError::Unsupported(inst.op)),
+                    }
+                }
+                _ => {
+                    // Zero the whole vector: EOR Vd, Vd, Vd.
+                    self.emitter.eor_v16b(dst_v, dst_v, dst_v);
+                }
+            }
+        } else if shift == 0 {
+            // No-op; result is the input. Storing back is a no-op too,
+            // but easier to just skip emit.
+        } else {
+            match (op, lane) {
+                (PShift::Sll, OpSize::B2) => self.emitter.shl_v8h(dst_v, dst_v, shift),
+                (PShift::Sll, OpSize::B4) => self.emitter.shl_v4s(dst_v, dst_v, shift),
+                (PShift::Sll, OpSize::B8) => self.emitter.shl_v2d(dst_v, dst_v, shift),
+                (PShift::Srl, OpSize::B2) => self.emitter.ushr_v8h(dst_v, dst_v, shift),
+                (PShift::Srl, OpSize::B4) => self.emitter.ushr_v4s(dst_v, dst_v, shift),
+                (PShift::Srl, OpSize::B8) => self.emitter.ushr_v2d(dst_v, dst_v, shift),
+                (PShift::Sra, OpSize::B2) => self.emitter.sshr_v8h(dst_v, dst_v, shift),
+                (PShift::Sra, OpSize::B4) => self.emitter.sshr_v4s(dst_v, dst_v, shift),
+                _ => return Err(LifterError::Unsupported(inst.op)),
+            }
+        }
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
         Ok(())
     }
 
@@ -2506,6 +2574,16 @@ enum FpPackedOp {
     Sub,
     Mul,
     Div,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PShift {
+    /// Logical left.
+    Sll,
+    /// Logical right.
+    Srl,
+    /// Arithmetic right (signed).
+    Sra,
 }
 
 #[derive(Debug, Clone, Copy)]

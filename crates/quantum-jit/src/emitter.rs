@@ -970,6 +970,74 @@ impl Emitter {
         let w = 0x6EE0_8C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+
+    // Packed shifts by immediate (Advanced SIMD shift by immediate format).
+    // Bit layout:  0 Q U 0 1 1 1 1 0 immh immb opcode 1 Rn Rd
+    // For SHL  (opcode=01010, U=0):  shift = immh:immb - element_size
+    // For USHR (opcode=00000, U=1):  shift = 2*element_size - immh:immb
+    // For SSHR (opcode=00000, U=0):  shift = 2*element_size - immh:immb
+    //
+    // We expose helpers for each lane size; the caller passes the
+    // x86 shift amount directly and we synthesize immh:immb.
+
+    /// SHL Vd.2D, Vn.2D, #shift (shift in 0..=63).
+    pub fn shl_v2d(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!(shift < 64);
+        let imm = 64 + shift; // immh:immb
+        let w = 0x4F00_5400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SHL Vd.4S, Vn.4S, #shift (shift in 0..=31).
+    pub fn shl_v4s(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!(shift < 32);
+        let imm = 32 + shift;
+        let w = 0x4F00_5400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SHL Vd.8H, Vn.8H, #shift (shift in 0..=15).
+    pub fn shl_v8h(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!(shift < 16);
+        let imm = 16 + shift;
+        let w = 0x4F00_5400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// USHR Vd.2D, Vn.2D, #shift (shift in 1..=64).
+    pub fn ushr_v2d(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!((1..=64).contains(&shift));
+        let imm = 128 - shift;
+        let w = 0x6F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// USHR Vd.4S, Vn.4S, #shift (shift in 1..=32).
+    pub fn ushr_v4s(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!((1..=32).contains(&shift));
+        let imm = 64 - shift;
+        let w = 0x6F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// USHR Vd.8H, Vn.8H, #shift (shift in 1..=16).
+    pub fn ushr_v8h(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!((1..=16).contains(&shift));
+        let imm = 32 - shift;
+        let w = 0x6F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// SSHR Vd.4S, Vn.4S, #shift — signed shift right (arith).
+    pub fn sshr_v4s(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!((1..=32).contains(&shift));
+        let imm = 64 - shift;
+        let w = 0x4F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// SSHR Vd.8H, Vn.8H, #shift.
+    pub fn sshr_v8h(&mut self, vd: Reg, vn: Reg, shift: u32) {
+        debug_assert!((1..=16).contains(&shift));
+        let imm = 32 - shift;
+        let w = 0x4F00_0400 | (imm << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============
