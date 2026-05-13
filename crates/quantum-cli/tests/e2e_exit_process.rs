@@ -15,7 +15,7 @@ use quantum_jit::iform::Op;
 use quantum_jit::lifter::Lifter;
 use quantum_kernel32::process::run_with_exit_trap;
 use quantum_kernel32::resolve;
-use quantum_loader::{apply_relocations, imports, load, PeFile};
+use quantum_loader::{PeFile, apply_relocations, imports, load};
 use quantum_runtime::{CodeCache, MachVmManager};
 
 fn build_pe_calling_exitprocess() -> Vec<u8> {
@@ -32,7 +32,7 @@ fn build_pe_calling_exitprocess() -> Vec<u8> {
     // COFF header
     let coff = pe_off + 4;
     bytes[coff..coff + 2].copy_from_slice(&0x8664u16.to_le_bytes()); // AMD64
-    bytes[coff + 2..coff + 4].copy_from_slice(&2u16.to_le_bytes());  // 2 sections
+    bytes[coff + 2..coff + 4].copy_from_slice(&2u16.to_le_bytes()); // 2 sections
     bytes[coff + 16..coff + 18].copy_from_slice(&240u16.to_le_bytes()); // optional header size
     bytes[coff + 18..coff + 20].copy_from_slice(&0x22u16.to_le_bytes()); // characteristics
 
@@ -90,7 +90,7 @@ fn build_pe_calling_exitprocess() -> Vec<u8> {
 
     // RVA 0x2010: IMAGE_IMPORT_DESCRIPTOR (20 bytes -> ends at RVA 0x2024).
     let desc = idata_raw + 0x10;
-    bytes[desc..desc + 4].copy_from_slice(&0x2040u32.to_le_bytes());    // OriginalFirstThunk (ILT)
+    bytes[desc..desc + 4].copy_from_slice(&0x2040u32.to_le_bytes()); // OriginalFirstThunk (ILT)
     bytes[desc + 12..desc + 16].copy_from_slice(&0x2080u32.to_le_bytes()); // Name
     bytes[desc + 16..desc + 20].copy_from_slice(&0x2000u32.to_le_bytes()); // FirstThunk (IAT)
     // RVA 0x2024: descriptor terminator (20 bytes of zeros -> ends at RVA 0x2038).
@@ -165,8 +165,5 @@ fn loads_runs_calls_exit_process_42() {
         entry();
     });
 
-    assert_eq!(
-        exit_code, 42,
-        "ExitProcess should have been called with 42"
-    );
+    assert_eq!(exit_code, 42, "ExitProcess should have been called with 42");
 }

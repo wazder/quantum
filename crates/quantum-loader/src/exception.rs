@@ -38,11 +38,18 @@ pub fn parse(image: &LoadedImage) -> Result<Vec<RuntimeFunction>> {
         let off = dir_entry.virtual_address + (i as u32) * RUNTIME_FUNCTION_SIZE;
         let bytes = image
             .rva_to_slice(off, RUNTIME_FUNCTION_SIZE as usize)
-            .ok_or(Error::Malformed { what: "RUNTIME_FUNCTION oob", at: off as usize })?;
+            .ok_or(Error::Malformed {
+                what: "RUNTIME_FUNCTION oob",
+                at: off as usize,
+            })?;
         let begin_rva = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let end_rva = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let unwind_info_rva = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-        out.push(RuntimeFunction { begin_rva, end_rva, unwind_info_rva });
+        out.push(RuntimeFunction {
+            begin_rva,
+            end_rva,
+            unwind_info_rva,
+        });
     }
 
     Ok(out)

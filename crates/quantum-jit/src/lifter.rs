@@ -103,7 +103,8 @@ impl<'a> Lifter<'a> {
         match *op {
             Operand::Mem(m) => Ok(self.mem_address_into(m, xtmp)),
             Operand::RipRel(disp, _) => {
-                let target = inst.guest_rip
+                let target = inst
+                    .guest_rip
                     .wrapping_add(inst.len as u64)
                     .wrapping_add(disp as u64);
                 self.emitter.load_const64(xtmp, target);
@@ -349,7 +350,9 @@ impl<'a> Lifter<'a> {
                 }
                 Ok(())
             }
-            (Operand::Reg(rd, OpSize::B8), Operand::Imm(imm, _)) if (0..(1 << 24)).contains(&imm) => {
+            (Operand::Reg(rd, OpSize::B8), Operand::Imm(imm, _))
+                if (0..(1 << 24)).contains(&imm) =>
+            {
                 let hd = host_reg(rd);
                 match kind {
                     ArithKind::Add => self.emitter.adds64_imm(hd, hd, imm as u32),
@@ -463,9 +466,7 @@ mod tests {
     #[test]
     fn mov_rax_imm64_uses_const_loader() {
         // 48 B8 EF BE AD DE FE CA 00 00 -> mov rax, 0xCAFEDEADBEEF
-        let words = lift_one(&[
-            0x48, 0xB8, 0xEF, 0xBE, 0xAD, 0xDE, 0xFE, 0xCA, 0x00, 0x00,
-        ]);
+        let words = lift_one(&[0x48, 0xB8, 0xEF, 0xBE, 0xAD, 0xDE, 0xFE, 0xCA, 0x00, 0x00]);
         // load_const64 emits movz then movk for non-zero lanes (3 total
         // since lane 3 is zero).
         // Mask 0xFFE0_001F preserves sf+opc+prefix+hw and Rd, isolating

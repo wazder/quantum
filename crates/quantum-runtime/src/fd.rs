@@ -77,29 +77,34 @@ impl HostFd {
     pub fn open_cstr(path: &core::ffi::CStr, flags: OpenFlags, mode: u16) -> Result<Self> {
         let fd = unsafe { crate::sys::open(path.as_ptr(), flags.to_host(), mode) };
         if fd < 0 {
-            return Err(Error::Host { syscall: "open", code: crate::sys::errno() });
+            return Err(Error::Host {
+                syscall: "open",
+                code: crate::sys::errno(),
+            });
         }
         Ok(Self(fd))
     }
 
     pub fn write(&self, buf: &[u8]) -> Result<usize> {
         let fd = self.0 & !STDIO_TAG;
-        let n = unsafe {
-            crate::sys::write(fd, buf.as_ptr().cast(), buf.len())
-        };
+        let n = unsafe { crate::sys::write(fd, buf.as_ptr().cast(), buf.len()) };
         if n < 0 {
-            return Err(Error::Host { syscall: "write", code: crate::sys::errno() });
+            return Err(Error::Host {
+                syscall: "write",
+                code: crate::sys::errno(),
+            });
         }
         Ok(n as usize)
     }
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize> {
         let fd = self.0 & !STDIO_TAG;
-        let n = unsafe {
-            crate::sys::read(fd, buf.as_mut_ptr().cast(), buf.len())
-        };
+        let n = unsafe { crate::sys::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n < 0 {
-            return Err(Error::Host { syscall: "read", code: crate::sys::errno() });
+            return Err(Error::Host {
+                syscall: "read",
+                code: crate::sys::errno(),
+            });
         }
         Ok(n as usize)
     }

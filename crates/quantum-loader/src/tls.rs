@@ -41,7 +41,10 @@ pub fn parse(image: &LoadedImage) -> Result<Option<TlsInfo>> {
 
     let bytes = image
         .rva_to_slice(dir_entry.virtual_address, 40)
-        .ok_or(Error::Malformed { what: "TLS directory", at: dir_entry.virtual_address as usize })?;
+        .ok_or(Error::Malformed {
+            what: "TLS directory",
+            at: dir_entry.virtual_address as usize,
+        })?;
 
     let raw_start_va = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
     let raw_end_va = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
@@ -51,9 +54,7 @@ pub fn parse(image: &LoadedImage) -> Result<Option<TlsInfo>> {
     let characteristics = u32::from_le_bytes(bytes[36..40].try_into().unwrap());
 
     let base = image.preferred_base;
-    let to_rva = |va: u64| -> u32 {
-        va.wrapping_sub(base) as u32
-    };
+    let to_rva = |va: u64| -> u32 { va.wrapping_sub(base) as u32 };
 
     let raw_start_rva = to_rva(raw_start_va);
     let raw_end_rva = to_rva(raw_end_va);
@@ -64,17 +65,19 @@ pub fn parse(image: &LoadedImage) -> Result<Option<TlsInfo>> {
     if callbacks_va != 0 {
         let mut off = callbacks_rva;
         loop {
-            let slot = image
-                .rva_to_slice(off, 8)
-                .ok_or(Error::Malformed { what: "tls callback slot", at: off as usize })?;
+            let slot = image.rva_to_slice(off, 8).ok_or(Error::Malformed {
+                what: "tls callback slot",
+                at: off as usize,
+            })?;
             let va = u64::from_le_bytes(slot.try_into().unwrap());
             if va == 0 {
                 break;
             }
             callbacks.push(to_rva(va));
-            off = off
-                .checked_add(8)
-                .ok_or(Error::Malformed { what: "tls callbacks overflow", at: off as usize })?;
+            off = off.checked_add(8).ok_or(Error::Malformed {
+                what: "tls callbacks overflow",
+                at: off as usize,
+            })?;
             if callbacks.len() > 256 {
                 return Err(Error::Malformed {
                     what: "tls callbacks unbounded",

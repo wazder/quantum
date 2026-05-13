@@ -65,22 +65,28 @@ pub fn parse(image: &LoadedImage) -> Result<Option<ResourceTree>> {
         Some(d) => d,
         None => return Ok(None),
     };
-    let root = parse_dir(image, dir_entry.virtual_address, dir_entry.virtual_address, 0)?;
+    let root = parse_dir(
+        image,
+        dir_entry.virtual_address,
+        dir_entry.virtual_address,
+        0,
+    )?;
     Ok(Some(ResourceTree { root }))
 }
 
-fn parse_dir(
-    image: &LoadedImage,
-    base_rva: u32,
-    dir_rva: u32,
-    depth: u32,
-) -> Result<ResourceDir> {
+fn parse_dir(image: &LoadedImage, base_rva: u32, dir_rva: u32, depth: u32) -> Result<ResourceDir> {
     if depth > 5 {
-        return Err(Error::Malformed { what: "resource depth", at: dir_rva as usize });
+        return Err(Error::Malformed {
+            what: "resource depth",
+            at: dir_rva as usize,
+        });
     }
     let bytes = image
         .rva_to_slice(dir_rva, DIR_HEADER_SIZE as usize)
-        .ok_or(Error::Malformed { what: "resource dir header", at: dir_rva as usize })?;
+        .ok_or(Error::Malformed {
+            what: "resource dir header",
+            at: dir_rva as usize,
+        })?;
     let characteristics = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
     let time_date_stamp = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
     let major_version = u16::from_le_bytes([bytes[8], bytes[9]]);
@@ -92,9 +98,13 @@ fn parse_dir(
     let mut entries = Vec::with_capacity(total as usize);
     for i in 0..total {
         let off = dir_rva + DIR_HEADER_SIZE + i * DIR_ENTRY_SIZE;
-        let entry_bytes = image
-            .rva_to_slice(off, DIR_ENTRY_SIZE as usize)
-            .ok_or(Error::Malformed { what: "resource entry oob", at: off as usize })?;
+        let entry_bytes =
+            image
+                .rva_to_slice(off, DIR_ENTRY_SIZE as usize)
+                .ok_or(Error::Malformed {
+                    what: "resource entry oob",
+                    at: off as usize,
+                })?;
         let id_raw = u32::from_le_bytes(entry_bytes[0..4].try_into().unwrap());
         let kind_raw = u32::from_le_bytes(entry_bytes[4..8].try_into().unwrap());
 
@@ -102,13 +112,18 @@ fn parse_dir(
             // High bit set: offset (from resource section base) to a
             // length-prefixed UTF-16LE string.
             let name_off = base_rva + (id_raw & 0x7FFF_FFFF);
-            let len_bytes = image
-                .rva_to_slice(name_off, 2)
-                .ok_or(Error::Malformed { what: "resource name len", at: name_off as usize })?;
+            let len_bytes = image.rva_to_slice(name_off, 2).ok_or(Error::Malformed {
+                what: "resource name len",
+                at: name_off as usize,
+            })?;
             let len = u16::from_le_bytes([len_bytes[0], len_bytes[1]]) as usize;
-            let chars_bytes = image
-                .rva_to_slice(name_off + 2, len * 2)
-                .ok_or(Error::Malformed { what: "resource name body", at: name_off as usize })?;
+            let chars_bytes =
+                image
+                    .rva_to_slice(name_off + 2, len * 2)
+                    .ok_or(Error::Malformed {
+                        what: "resource name body",
+                        at: name_off as usize,
+                    })?;
             let mut name = String::new();
             let mut i = 0;
             while i < chars_bytes.len() {
@@ -132,7 +147,10 @@ fn parse_dir(
             let data_off = base_rva + kind_raw;
             let data_bytes = image
                 .rva_to_slice(data_off, DATA_ENTRY_SIZE as usize)
-                .ok_or(Error::Malformed { what: "resource data entry", at: data_off as usize })?;
+                .ok_or(Error::Malformed {
+                    what: "resource data entry",
+                    at: data_off as usize,
+                })?;
             ResourceKind::Data(ResourceData {
                 data_rva: u32::from_le_bytes(data_bytes[0..4].try_into().unwrap()),
                 size: u32::from_le_bytes(data_bytes[4..8].try_into().unwrap()),
@@ -140,7 +158,10 @@ fn parse_dir(
             })
         };
 
-        entries.push(ResourceEntry { id: resource_id, kind });
+        entries.push(ResourceEntry {
+            id: resource_id,
+            kind,
+        });
     }
 
     Ok(ResourceDir {

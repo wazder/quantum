@@ -49,7 +49,10 @@ pub fn parse(image: &LoadedImage) -> Result<Option<LoadConfig>> {
     // it overruns the directory.
     let head = image
         .rva_to_slice(dir_entry.virtual_address, 4)
-        .ok_or(Error::Malformed { what: "load_config head", at: dir_entry.virtual_address as usize })?;
+        .ok_or(Error::Malformed {
+            what: "load_config head",
+            at: dir_entry.virtual_address as usize,
+        })?;
     let size = u32::from_le_bytes(head.try_into().unwrap());
     if size < 0x70 || size > dir_entry.size {
         return Err(Error::Malformed {
@@ -60,7 +63,10 @@ pub fn parse(image: &LoadedImage) -> Result<Option<LoadConfig>> {
 
     let bytes = image
         .rva_to_slice(dir_entry.virtual_address, size as usize)
-        .ok_or(Error::Malformed { what: "load_config body", at: dir_entry.virtual_address as usize })?;
+        .ok_or(Error::Malformed {
+            what: "load_config body",
+            at: dir_entry.virtual_address as usize,
+        })?;
 
     // Helper to read fields and return Default when the truncated record
     // doesn't carry them (older binaries).

@@ -28,9 +28,7 @@ pub struct RelocStats {
 /// Apply base relocations against the supplied delta
 /// (`actual_base - preferred_base`). Idempotent if delta is zero.
 pub fn apply(image: &mut LoadedImage) -> Result<RelocStats> {
-    let delta = image
-        .actual_base
-        .wrapping_sub(image.preferred_base);
+    let delta = image.actual_base.wrapping_sub(image.preferred_base);
     if delta == 0 {
         return Ok(RelocStats::default());
     }
@@ -45,16 +43,23 @@ pub fn apply(image: &mut LoadedImage) -> Result<RelocStats> {
     let end = dir.virtual_address.saturating_add(dir.size);
 
     while cursor < end {
-        let header = image
-            .rva_to_slice(cursor, 8)
-            .ok_or(Error::Malformed { what: "reloc block header", at: cursor as usize })?;
+        let header = image.rva_to_slice(cursor, 8).ok_or(Error::Malformed {
+            what: "reloc block header",
+            at: cursor as usize,
+        })?;
         let page_rva = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
         let block_size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
         if block_size < 8 {
-            return Err(Error::Malformed { what: "reloc block_size < 8", at: cursor as usize });
+            return Err(Error::Malformed {
+                what: "reloc block_size < 8",
+                at: cursor as usize,
+            });
         }
         if cursor.saturating_add(block_size) > end {
-            return Err(Error::Malformed { what: "reloc block past dir", at: cursor as usize });
+            return Err(Error::Malformed {
+                what: "reloc block past dir",
+                at: cursor as usize,
+            });
         }
 
         stats.blocks += 1;
@@ -65,12 +70,18 @@ pub fn apply(image: &mut LoadedImage) -> Result<RelocStats> {
         // Snapshot them so we don't alias the image while writing.
         let mut entries = [0u16; 4096 / 2];
         if entry_count > entries.len() {
-            return Err(Error::Malformed { what: "reloc block oversized", at: cursor as usize });
+            return Err(Error::Malformed {
+                what: "reloc block oversized",
+                at: cursor as usize,
+            });
         }
         {
             let raw = image
                 .rva_to_slice(entries_off, entry_count * 2)
-                .ok_or(Error::Malformed { what: "reloc entries", at: entries_off as usize })?;
+                .ok_or(Error::Malformed {
+                    what: "reloc entries",
+                    at: entries_off as usize,
+                })?;
             for i in 0..entry_count {
                 entries[i] = u16::from_le_bytes([raw[i * 2], raw[i * 2 + 1]]);
             }
@@ -87,7 +98,10 @@ pub fn apply(image: &mut LoadedImage) -> Result<RelocStats> {
                 REL_DIR64 => {
                     let slot = image
                         .rva_to_slice_mut(target_rva, 8)
-                        .ok_or(Error::Malformed { what: "DIR64 oob", at: target_rva as usize })?;
+                        .ok_or(Error::Malformed {
+                            what: "DIR64 oob",
+                            at: target_rva as usize,
+                        })?;
                     let old = u64::from_le_bytes(slot.try_into().unwrap());
                     let new = old.wrapping_add(delta);
                     slot.copy_from_slice(&new.to_le_bytes());
@@ -96,7 +110,10 @@ pub fn apply(image: &mut LoadedImage) -> Result<RelocStats> {
                 REL_HIGHLOW => {
                     let slot = image
                         .rva_to_slice_mut(target_rva, 4)
-                        .ok_or(Error::Malformed { what: "HIGHLOW oob", at: target_rva as usize })?;
+                        .ok_or(Error::Malformed {
+                            what: "HIGHLOW oob",
+                            at: target_rva as usize,
+                        })?;
                     let old = u32::from_le_bytes(slot.try_into().unwrap());
                     let new = old.wrapping_add(delta as u32);
                     slot.copy_from_slice(&new.to_le_bytes());
@@ -203,7 +220,10 @@ mod tests {
 
         let pointer_rva = 0x1008u32;
         let before = u64::from_le_bytes(
-            img.rva_to_slice(pointer_rva, 8).unwrap().try_into().unwrap(),
+            img.rva_to_slice(pointer_rva, 8)
+                .unwrap()
+                .try_into()
+                .unwrap(),
         );
         assert_eq!(before, preferred + 0x1234);
 
@@ -213,7 +233,10 @@ mod tests {
         assert_eq!(stats.absolute, 1);
 
         let after = u64::from_le_bytes(
-            img.rva_to_slice(pointer_rva, 8).unwrap().try_into().unwrap(),
+            img.rva_to_slice(pointer_rva, 8)
+                .unwrap()
+                .try_into()
+                .unwrap(),
         );
         assert_eq!(after, (preferred + 0x1234).wrapping_add(delta));
     }

@@ -60,9 +60,10 @@ pub fn parse(image: &LoadedImage) -> Result<Vec<DebugEntry>> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let off = dir_entry.virtual_address + (i as u32) * 28;
-        let bytes = image
-            .rva_to_slice(off, 28)
-            .ok_or(Error::Malformed { what: "debug entry oob", at: off as usize })?;
+        let bytes = image.rva_to_slice(off, 28).ok_or(Error::Malformed {
+            what: "debug entry oob",
+            at: off as usize,
+        })?;
         let kind = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         let time_date_stamp = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
         let size_of_data = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
@@ -89,7 +90,10 @@ pub fn parse(image: &LoadedImage) -> Result<Vec<DebugEntry>> {
 fn parse_codeview(image: &LoadedImage, rva: u32, size: u32) -> Result<Option<CodeView>> {
     let bytes = image
         .rva_to_slice(rva, size as usize)
-        .ok_or(Error::Malformed { what: "codeview blob", at: rva as usize })?;
+        .ok_or(Error::Malformed {
+            what: "codeview blob",
+            at: rva as usize,
+        })?;
     if bytes.len() < 24 || &bytes[0..4] != b"RSDS" {
         // Not RSDS; could be NB10 (older). We only handle RSDS today.
         return Ok(None);
@@ -98,9 +102,19 @@ fn parse_codeview(image: &LoadedImage, rva: u32, size: u32) -> Result<Option<Cod
     guid.copy_from_slice(&bytes[4..20]);
     let age = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
     let path_bytes = &bytes[24..];
-    let end = path_bytes.iter().position(|&b| b == 0).unwrap_or(path_bytes.len());
+    let end = path_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(path_bytes.len());
     let pdb_path = core::str::from_utf8(&path_bytes[..end])
-        .map_err(|_| Error::Malformed { what: "codeview path utf8", at: (rva as usize) + 24 })?
+        .map_err(|_| Error::Malformed {
+            what: "codeview path utf8",
+            at: (rva as usize) + 24,
+        })?
         .into();
-    Ok(Some(CodeView { guid, age, pdb_path }))
+    Ok(Some(CodeView {
+        guid,
+        age,
+        pdb_path,
+    }))
 }

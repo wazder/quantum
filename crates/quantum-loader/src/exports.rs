@@ -63,7 +63,10 @@ pub fn parse(image: &LoadedImage) -> Result<Option<ExportTable>> {
 
     let header = image
         .rva_to_slice(dir_entry.virtual_address, 40)
-        .ok_or(Error::Malformed { what: "export directory", at: dir_entry.virtual_address as usize })?;
+        .ok_or(Error::Malformed {
+            what: "export directory",
+            at: dir_entry.virtual_address as usize,
+        })?;
 
     let name_rva = u32::from_le_bytes(header[12..16].try_into().unwrap());
     let base = u32::from_le_bytes(header[16..20].try_into().unwrap());
@@ -89,10 +92,14 @@ pub fn parse(image: &LoadedImage) -> Result<Option<ExportTable>> {
                 what: "export funcs overflow",
                 at: funcs_rva as usize,
             })?)
-            .ok_or(Error::Malformed { what: "export funcs offset", at: funcs_rva as usize })?;
-        let bytes = image
-            .rva_to_slice(off, 4)
-            .ok_or(Error::Malformed { what: "export func entry", at: off as usize })?;
+            .ok_or(Error::Malformed {
+                what: "export funcs offset",
+                at: funcs_rva as usize,
+            })?;
+        let bytes = image.rva_to_slice(off, 4).ok_or(Error::Malformed {
+            what: "export func entry",
+            at: off as usize,
+        })?;
         let target_rva = u32::from_le_bytes(bytes.try_into().unwrap());
 
         let target = if target_rva >= dir_start && target_rva < dir_end {
@@ -104,45 +111,66 @@ pub fn parse(image: &LoadedImage) -> Result<Option<ExportTable>> {
             ExportTarget::Rva(target_rva)
         };
 
-        entries.push(Export { ordinal: base + i, target });
+        entries.push(Export {
+            ordinal: base + i,
+            target,
+        });
     }
 
     let mut names = Vec::with_capacity(num_names as usize);
     for i in 0..num_names {
         let name_off = names_rva.saturating_add(i * 4);
         let ord_off = ordinals_rva.saturating_add(i * 2);
-        let name_rva_bytes = image
-            .rva_to_slice(name_off, 4)
-            .ok_or(Error::Malformed { what: "export name entry", at: name_off as usize })?;
-        let ord_bytes = image
-            .rva_to_slice(ord_off, 2)
-            .ok_or(Error::Malformed { what: "export ordinal entry", at: ord_off as usize })?;
+        let name_rva_bytes = image.rva_to_slice(name_off, 4).ok_or(Error::Malformed {
+            what: "export name entry",
+            at: name_off as usize,
+        })?;
+        let ord_bytes = image.rva_to_slice(ord_off, 2).ok_or(Error::Malformed {
+            what: "export ordinal entry",
+            at: ord_off as usize,
+        })?;
         let name_rva_i = u32::from_le_bytes(name_rva_bytes.try_into().unwrap());
         let biased = u16::from_le_bytes([ord_bytes[0], ord_bytes[1]]) as u32;
         let name = read_cstr(image, name_rva_i)?;
-        names.push(NamedExport { name, ordinal: base + biased });
+        names.push(NamedExport {
+            name,
+            ordinal: base + biased,
+        });
     }
 
-    Ok(Some(ExportTable { module_name, ordinal_base: base, entries, names }))
+    Ok(Some(ExportTable {
+        module_name,
+        ordinal_base: base,
+        entries,
+        names,
+    }))
 }
 
 fn read_cstr(image: &LoadedImage, rva: u32) -> Result<String> {
     let mut out = Vec::new();
     let mut off = rva;
     loop {
-        let b = image
-            .rva_to_slice(off, 1)
-            .ok_or(Error::Malformed { what: "export cstr", at: off as usize })?[0];
+        let b = image.rva_to_slice(off, 1).ok_or(Error::Malformed {
+            what: "export cstr",
+            at: off as usize,
+        })?[0];
         if b == 0 {
             break;
         }
         out.push(b);
-        off = off
-            .checked_add(1)
-            .ok_or(Error::Malformed { what: "export cstr overflow", at: off as usize })?;
+        off = off.checked_add(1).ok_or(Error::Malformed {
+            what: "export cstr overflow",
+            at: off as usize,
+        })?;
         if out.len() > 4096 {
-            return Err(Error::Malformed { what: "export cstr unbounded", at: rva as usize });
+            return Err(Error::Malformed {
+                what: "export cstr unbounded",
+                at: rva as usize,
+            });
         }
     }
-    String::from_utf8(out).map_err(|_| Error::Malformed { what: "export cstr utf8", at: rva as usize })
+    String::from_utf8(out).map_err(|_| Error::Malformed {
+        what: "export cstr utf8",
+        at: rva as usize,
+    })
 }

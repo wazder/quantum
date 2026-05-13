@@ -106,7 +106,9 @@ pub struct MachVmManager {
 
 impl MachVmManager {
     pub fn new() -> Self {
-        Self { task: unsafe { crate::sys::mach_task_self() } }
+        Self {
+            task: unsafe { crate::sys::mach_task_self() },
+        }
     }
 }
 
@@ -120,10 +122,17 @@ impl MemoryManager for MachVmManager {
     fn allocate(&self, hint: Option<u64>, size: usize, prot: Protection) -> Result<Region> {
         use crate::sys::*;
         let mut addr: mach_vm_address_t = hint.unwrap_or(0);
-        let flags = if hint.is_some() { VM_FLAGS_FIXED } else { VM_FLAGS_ANYWHERE };
+        let flags = if hint.is_some() {
+            VM_FLAGS_FIXED
+        } else {
+            VM_FLAGS_ANYWHERE
+        };
         let kr = unsafe { mach_vm_allocate(self.task, &mut addr, size as u64, flags) };
         if kr != KERN_SUCCESS {
-            return Err(Error::Host { syscall: "mach_vm_allocate", code: kr });
+            return Err(Error::Host {
+                syscall: "mach_vm_allocate",
+                code: kr,
+            });
         }
         // mach_vm_allocate gives RW. Adjust if caller asked for less or for X.
         if prot != Protection::RW {
@@ -131,11 +140,16 @@ impl MemoryManager for MachVmManager {
             let kr = unsafe { mach_vm_protect(self.task, addr, size as u64, 0, host_prot) };
             if kr != KERN_SUCCESS {
                 let _ = unsafe { mach_vm_deallocate(self.task, addr, size as u64) };
-                return Err(Error::Host { syscall: "mach_vm_protect", code: kr });
+                return Err(Error::Host {
+                    syscall: "mach_vm_protect",
+                    code: kr,
+                });
             }
         }
-        let nn = NonNull::new(addr as *mut u8)
-            .ok_or(Error::Host { syscall: "mach_vm_allocate(null)", code: 0 })?;
+        let nn = NonNull::new(addr as *mut u8).ok_or(Error::Host {
+            syscall: "mach_vm_allocate(null)",
+            code: 0,
+        })?;
         Ok(Region::from_raw(nn, size, false))
     }
 
@@ -152,20 +166,27 @@ impl MemoryManager for MachVmManager {
             )
         };
         if ptr == MAP_FAILED {
-            return Err(Error::Host { syscall: "mmap(MAP_JIT)", code: errno() });
+            return Err(Error::Host {
+                syscall: "mmap(MAP_JIT)",
+                code: errno(),
+            });
         }
-        let nn = NonNull::new(ptr.cast::<u8>())
-            .ok_or(Error::Host { syscall: "mmap(MAP_JIT,null)", code: 0 })?;
+        let nn = NonNull::new(ptr.cast::<u8>()).ok_or(Error::Host {
+            syscall: "mmap(MAP_JIT,null)",
+            code: 0,
+        })?;
         Ok(Region::from_raw(nn, size, true))
     }
 
     fn protect(&self, addr: *mut u8, size: usize, prot: Protection) -> Result<()> {
         use crate::sys::*;
-        let kr = unsafe {
-            mach_vm_protect(self.task, addr as u64, size as u64, 0, host_vm_prot(prot))
-        };
+        let kr =
+            unsafe { mach_vm_protect(self.task, addr as u64, size as u64, 0, host_vm_prot(prot)) };
         if kr != KERN_SUCCESS {
-            return Err(Error::Host { syscall: "mach_vm_protect", code: kr });
+            return Err(Error::Host {
+                syscall: "mach_vm_protect",
+                code: kr,
+            });
         }
         Ok(())
     }

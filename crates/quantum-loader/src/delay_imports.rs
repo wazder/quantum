@@ -63,7 +63,10 @@ pub fn parse(image: &LoadedImage) -> Result<DelayImportTable> {
         }
         let bytes = image
             .rva_to_slice(cursor, DELAY_DESCRIPTOR_SIZE as usize)
-            .ok_or(Error::Malformed { what: "delay-load descriptor", at: cursor as usize })?;
+            .ok_or(Error::Malformed {
+                what: "delay-load descriptor",
+                at: cursor as usize,
+            })?;
 
         let attributes = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let name_rva = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
@@ -74,11 +77,7 @@ pub fn parse(image: &LoadedImage) -> Result<DelayImportTable> {
         let unload_iat_rva = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
         let time_date_stamp = u32::from_le_bytes(bytes[28..32].try_into().unwrap());
 
-        if attributes == 0
-            && name_rva == 0
-            && iat_rva == 0
-            && int_rva == 0
-        {
+        if attributes == 0 && name_rva == 0 && iat_rva == 0 && int_rva == 0 {
             break;
         }
 

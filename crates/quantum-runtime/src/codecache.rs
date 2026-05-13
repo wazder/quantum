@@ -25,7 +25,11 @@ impl CodeCache {
     pub fn new(capacity: usize) -> Result<Self> {
         let mem = MachVmManager::new();
         let region = mem.allocate_jit(capacity)?;
-        Ok(Self { region, used: 0, mem })
+        Ok(Self {
+            region,
+            used: 0,
+            mem,
+        })
     }
 
     pub fn capacity(&self) -> usize {
@@ -40,7 +44,10 @@ impl CodeCache {
     /// the installed code. The pointer is RX-executable on return.
     pub fn install(&mut self, bytes: &[u8]) -> Result<NonNull<u8>> {
         if self.used + bytes.len() > self.region.len() {
-            return Err(Error::Host { syscall: "codecache:install (oversize)", code: 0 });
+            return Err(Error::Host {
+                syscall: "codecache:install (oversize)",
+                code: 0,
+            });
         }
         // The whole MAP_JIT region's page protection is RWX, but the
         // hardware uses a per-thread mode (W^X) flipped via

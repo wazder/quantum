@@ -55,10 +55,7 @@ pub enum ImportEntry {
         iat_slot_rva: u32,
     },
     /// Import by ordinal only.
-    Ordinal {
-        ordinal: u16,
-        iat_slot_rva: u32,
-    },
+    Ordinal { ordinal: u16, iat_slot_rva: u32 },
 }
 
 impl ImportEntry {
@@ -127,7 +124,10 @@ pub(crate) fn parse_with_directory(image: &LoadedImage, directory: usize) -> Res
         }
         let bytes = image
             .rva_to_slice(cursor, IMPORT_DESCRIPTOR_SIZE as usize)
-            .ok_or(Error::Malformed { what: "import descriptor", at: cursor as usize })?;
+            .ok_or(Error::Malformed {
+                what: "import descriptor",
+                at: cursor as usize,
+            })?;
 
         let original_first_thunk = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         let name_rva = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
@@ -165,11 +165,7 @@ pub(crate) fn read_cstr_pub(image: &LoadedImage, rva: u32) -> Result<String> {
     read_cstr(image, rva)
 }
 
-fn parse_thunk_array(
-    image: &LoadedImage,
-    ilt_rva: u32,
-    iat_rva: u32,
-) -> Result<Vec<ImportEntry>> {
+fn parse_thunk_array(image: &LoadedImage, ilt_rva: u32, iat_rva: u32) -> Result<Vec<ImportEntry>> {
     // Use ILT if present (preserves original thunks even after IAT is filled),
     // otherwise fall back to IAT.
     let array_rva = if ilt_rva != 0 { ilt_rva } else { iat_rva };
@@ -185,10 +181,14 @@ fn parse_thunk_array(
                 what: "thunk index overflow",
                 at: array_rva as usize,
             })?)
-            .ok_or(Error::Malformed { what: "thunk rva overflow", at: array_rva as usize })?;
-        let slot = image
-            .rva_to_slice(off, 8)
-            .ok_or(Error::Malformed { what: "thunk slot oob", at: off as usize })?;
+            .ok_or(Error::Malformed {
+                what: "thunk rva overflow",
+                at: array_rva as usize,
+            })?;
+        let slot = image.rva_to_slice(off, 8).ok_or(Error::Malformed {
+            what: "thunk slot oob",
+            at: off as usize,
+        })?;
         let thunk = u64::from_le_bytes(slot.try_into().unwrap());
         if thunk == 0 {
             break;
@@ -201,16 +201,24 @@ fn parse_thunk_array(
 
         if thunk & IMPORT_BY_ORDINAL_FLAG_64 != 0 {
             let ordinal = (thunk & IMPORT_ORDINAL_MASK_64) as u16;
-            entries.push(ImportEntry::Ordinal { ordinal, iat_slot_rva });
+            entries.push(ImportEntry::Ordinal {
+                ordinal,
+                iat_slot_rva,
+            });
         } else {
             let by_name_rva = (thunk & 0x7FFF_FFFF) as u32;
             // Layout: u16 Hint; char Name[];
-            let hint_bytes = image
-                .rva_to_slice(by_name_rva, 2)
-                .ok_or(Error::Malformed { what: "by-name hint", at: by_name_rva as usize })?;
+            let hint_bytes = image.rva_to_slice(by_name_rva, 2).ok_or(Error::Malformed {
+                what: "by-name hint",
+                at: by_name_rva as usize,
+            })?;
             let hint = u16::from_le_bytes([hint_bytes[0], hint_bytes[1]]);
             let name = read_cstr(image, by_name_rva + 2)?;
-            entries.push(ImportEntry::Name { hint, name, iat_slot_rva });
+            entries.push(ImportEntry::Name {
+                hint,
+                name,
+                iat_slot_rva,
+            });
         }
 
         idx += 1;
@@ -229,21 +237,29 @@ fn read_cstr(image: &LoadedImage, rva: u32) -> Result<String> {
     let mut out = Vec::new();
     let mut off = rva;
     loop {
-        let b = image
-            .rva_to_slice(off, 1)
-            .ok_or(Error::Malformed { what: "cstr oob", at: off as usize })?[0];
+        let b = image.rva_to_slice(off, 1).ok_or(Error::Malformed {
+            what: "cstr oob",
+            at: off as usize,
+        })?[0];
         if b == 0 {
             break;
         }
         out.push(b);
-        off = off
-            .checked_add(1)
-            .ok_or(Error::Malformed { what: "cstr overflow", at: off as usize })?;
+        off = off.checked_add(1).ok_or(Error::Malformed {
+            what: "cstr overflow",
+            at: off as usize,
+        })?;
         if out.len() > 4096 {
-            return Err(Error::Malformed { what: "cstr unbounded", at: rva as usize });
+            return Err(Error::Malformed {
+                what: "cstr unbounded",
+                at: rva as usize,
+            });
         }
     }
-    String::from_utf8(out).map_err(|_| Error::Malformed { what: "cstr utf8", at: rva as usize })
+    String::from_utf8(out).map_err(|_| Error::Malformed {
+        what: "cstr utf8",
+        at: rva as usize,
+    })
 }
 
 #[cfg(test)]
@@ -345,7 +361,11 @@ mod tests {
         assert_eq!(dll.name, "KERNEL32.DLL");
         assert_eq!(dll.entries.len(), 1);
         match &dll.entries[0] {
-            ImportEntry::Name { hint, name, iat_slot_rva } => {
+            ImportEntry::Name {
+                hint,
+                name,
+                iat_slot_rva,
+            } => {
                 assert_eq!(*hint, 0);
                 assert_eq!(name, "ExitProcess");
                 assert_eq!(*iat_slot_rva, 0x1038);

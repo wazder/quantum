@@ -55,7 +55,11 @@ pub struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     pub fn new(bytes: &'a [u8], guest_rip: u64) -> Self {
-        Self { bytes, pos: 0, guest_rip }
+        Self {
+            bytes,
+            pos: 0,
+            guest_rip,
+        }
     }
 
     pub fn pos(&self) -> usize {
@@ -207,11 +211,7 @@ impl<'a> Decoder<'a> {
 
     fn op_size_default64(&self, p: &Prefixes) -> OpSize {
         // Used for PUSH/POP/CALL/JMP — default 64-bit, OSIZE=66 → 16.
-        if p.osize {
-            OpSize::B2
-        } else {
-            OpSize::B8
-        }
+        if p.osize { OpSize::B2 } else { OpSize::B8 }
     }
 
     fn decode_modrm(
@@ -287,7 +287,14 @@ impl<'a> Decoder<'a> {
             _ => 0,
         };
 
-        Ok(Operand::Mem(Mem { base, index, scale, disp, size, seg }))
+        Ok(Operand::Mem(Mem {
+            base,
+            index,
+            scale,
+            disp,
+            size,
+            seg,
+        }))
     }
 
     fn reg_operand(&self, p: &Prefixes, reg_field: u8, size: OpSize) -> Operand {
@@ -1001,7 +1008,11 @@ impl<'a> Decoder<'a> {
                 [Some(rewidth(rm_call, call_size)), None, None],
                 rip,
             )),
-            6 => Ok(make(Op::Push, [Some(rewidth(rm_call, call_size)), None, None], rip)),
+            6 => Ok(make(
+                Op::Push,
+                [Some(rewidth(rm_call, call_size)), None, None],
+                rip,
+            )),
             _ => Ok(unhandled(rip)),
         }
     }
@@ -1020,11 +1031,21 @@ fn rewidth(op: Operand, size: OpSize) -> Operand {
 }
 
 fn make(op: Op, operands: [Option<Operand>; 3], rip: u64) -> Inst {
-    Inst { op, operands, len: 0, guest_rip: rip }
+    Inst {
+        op,
+        operands,
+        len: 0,
+        guest_rip: rip,
+    }
 }
 
 fn unhandled(rip: u64) -> Inst {
-    Inst { op: Op::Unhandled, operands: [None, None, None], len: 0, guest_rip: rip }
+    Inst {
+        op: Op::Unhandled,
+        operands: [None, None, None],
+        len: 0,
+        guest_rip: rip,
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

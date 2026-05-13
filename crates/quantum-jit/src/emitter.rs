@@ -197,7 +197,11 @@ impl Emitter {
             self.code[word_index] =
                 patch_branch(base_word, kind, delta).expect("backward branch out of range");
         } else {
-            self.fixups.push(Fixup { word_index, kind, label: label.0 });
+            self.fixups.push(Fixup {
+                word_index,
+                kind,
+                label: label.0,
+            });
         }
     }
 }
@@ -238,7 +242,10 @@ fn patch_branch(base: u32, kind: FixupKind, delta_words: i64) -> Result<u32, Fin
 
 impl Emitter {
     fn movw(&mut self, sf: Sf, opc: u32, hw: u32, imm16: u16, rd: Reg) {
-        debug_assert!(hw < if sf == Sf::X { 4 } else { 2 }, "hw out of range for sf");
+        debug_assert!(
+            hw < if sf == Sf::X { 4 } else { 2 },
+            "hw out of range for sf"
+        );
         let w = ((sf as u32) << 31)
             | (opc << 29)
             | (0b100101 << 23)
@@ -594,7 +601,17 @@ impl Emitter {
 // =============== Load/Store pair ===============
 
 impl Emitter {
-    fn ldstp(&mut self, opc: u32, v: u32, load: u32, idx_mode: u32, imm7: i32, rt2: Reg, rn: Reg, rt: Reg) {
+    fn ldstp(
+        &mut self,
+        opc: u32,
+        v: u32,
+        load: u32,
+        idx_mode: u32,
+        imm7: i32,
+        rt2: Reg,
+        rn: Reg,
+        rt: Reg,
+    ) {
         let imm7_bits = (imm7 as u32) & 0x7F;
         let w = (opc << 30)
             | (0b101 << 27)
@@ -673,10 +690,7 @@ impl Emitter {
         debug_assert!(bit < 64);
         let b5 = (bit >> 5) & 1;
         let b40 = bit & 0x1F;
-        let base = (b5 << 31)
-            | (0b011011 << 25)
-            | (b40 << 19)
-            | (rt.0 as u32);
+        let base = (b5 << 31) | (0b011011 << 25) | (b40 << 19) | (rt.0 as u32);
         self.emit_branch(base, FixupKind::Branch14, label);
     }
 
@@ -684,11 +698,7 @@ impl Emitter {
         debug_assert!(bit < 64);
         let b5 = (bit >> 5) & 1;
         let b40 = bit & 0x1F;
-        let base = (b5 << 31)
-            | (0b011011 << 25)
-            | (1 << 24)
-            | (b40 << 19)
-            | (rt.0 as u32);
+        let base = (b5 << 31) | (0b011011 << 25) | (1 << 24) | (b40 << 19) | (rt.0 as u32);
         self.emit_branch(base, FixupKind::Branch14, label);
     }
 
@@ -794,10 +804,7 @@ mod tests {
     #[test]
     fn sub_sp_imm_lsl12() {
         // sub sp, sp, #1, lsl #12 -> 0xD14007FF (confirmed via clang -c)
-        assert_eq!(
-            one(|e| e.sub64_imm(Reg::SP, Reg::SP, 1 << 12)),
-            0xD140_07FF
-        );
+        assert_eq!(one(|e| e.sub64_imm(Reg::SP, Reg::SP, 1 << 12)), 0xD140_07FF);
     }
 
     #[test]

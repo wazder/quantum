@@ -101,13 +101,19 @@ impl<'a> PeFile<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
         let dos_sig = read_u16(bytes, 0)?;
         if dos_sig != DOS_SIG {
-            return Err(Error::Malformed { what: "DOS signature", at: 0 });
+            return Err(Error::Malformed {
+                what: "DOS signature",
+                at: 0,
+            });
         }
 
         let e_lfanew = read_u32(bytes, 0x3C)? as usize;
         let pe_sig = read_u32(bytes, e_lfanew)?;
         if pe_sig != PE_SIG {
-            return Err(Error::Malformed { what: "PE signature", at: e_lfanew });
+            return Err(Error::Malformed {
+                what: "PE signature",
+                at: e_lfanew,
+            });
         }
 
         let coff_off = e_lfanew + 4;
@@ -126,7 +132,12 @@ impl<'a> PeFile<'a> {
         let kind = match magic {
             OPT_MAGIC_PE32 => PeKind::Pe32,
             OPT_MAGIC_PE32PLUS => PeKind::Pe32Plus,
-            _ => return Err(Error::Malformed { what: "optional header magic", at: opt_off }),
+            _ => {
+                return Err(Error::Malformed {
+                    what: "optional header magic",
+                    at: opt_off,
+                });
+            }
         };
 
         let opt = Self::parse_optional(bytes, opt_off, kind)?;
@@ -135,7 +146,10 @@ impl<'a> PeFile<'a> {
         // Validate section table is within the slice.
         let sections_end = sections_offset + 40 * coff.number_of_sections as usize;
         if sections_end > bytes.len() {
-            return Err(Error::Malformed { what: "section table", at: sections_offset });
+            return Err(Error::Malformed {
+                what: "section table",
+                at: sections_offset,
+            });
         }
 
         Ok(Self {
@@ -254,21 +268,30 @@ impl Iterator for SectionIter<'_> {
 fn read_u16(b: &[u8], off: usize) -> Result<u16> {
     b.get(off..off + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
-        .ok_or(Error::Malformed { what: "u16 read", at: off })
+        .ok_or(Error::Malformed {
+            what: "u16 read",
+            at: off,
+        })
 }
 
 #[inline]
 fn read_u32(b: &[u8], off: usize) -> Result<u32> {
     b.get(off..off + 4)
         .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-        .ok_or(Error::Malformed { what: "u32 read", at: off })
+        .ok_or(Error::Malformed {
+            what: "u32 read",
+            at: off,
+        })
 }
 
 #[inline]
 fn read_u64(b: &[u8], off: usize) -> Result<u64> {
     b.get(off..off + 8)
         .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
-        .ok_or(Error::Malformed { what: "u64 read", at: off })
+        .ok_or(Error::Malformed {
+            what: "u64 read",
+            at: off,
+        })
 }
 
 #[cfg(test)]
@@ -344,6 +367,9 @@ mod tests {
     #[test]
     fn rejects_bad_dos_sig() {
         let bytes = vec![0u8; 0x400];
-        assert!(matches!(PeFile::parse(&bytes), Err(Error::Malformed { .. })));
+        assert!(matches!(
+            PeFile::parse(&bytes),
+            Err(Error::Malformed { .. })
+        ));
     }
 }

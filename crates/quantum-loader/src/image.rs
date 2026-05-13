@@ -117,9 +117,7 @@ impl LoadedImage {
             return None;
         }
         // SAFETY: see `rva_to_slice`. `&mut self` ensures no aliasing.
-        Some(unsafe {
-            core::slice::from_raw_parts_mut(self.region.base().add(rva as usize), len)
-        })
+        Some(unsafe { core::slice::from_raw_parts_mut(self.region.base().add(rva as usize), len) })
     }
 
     /// Find the section that contains `rva`, if any.
@@ -128,7 +126,10 @@ impl LoadedImage {
     }
 
     pub fn data_dir(&self, index: usize) -> Option<DataDirectory> {
-        self.data_directories.get(index).copied().filter(|d| d.virtual_address != 0 && d.size != 0)
+        self.data_directories
+            .get(index)
+            .copied()
+            .filter(|d| d.virtual_address != 0 && d.size != 0)
     }
 
     /// Apply each section's `IMAGE_SCN_MEM_*` bits as host VM protections.
@@ -167,7 +168,10 @@ fn align_up(x: usize, align: usize) -> usize {
 pub fn load(pe: &PeFile<'_>, mem: &dyn MemoryManager) -> Result<LoadedImage> {
     let size = pe.opt.size_of_image as usize;
     if size == 0 || size > 2 * 1024 * 1024 * 1024 {
-        return Err(Error::Malformed { what: "size_of_image", at: 0 });
+        return Err(Error::Malformed {
+            what: "size_of_image",
+            at: 0,
+        });
     }
 
     // Allocate. Start RW so we can scribble headers and section data.
@@ -179,7 +183,10 @@ pub fn load(pe: &PeFile<'_>, mem: &dyn MemoryManager) -> Result<LoadedImage> {
     // Copy headers (everything up to SizeOfHeaders).
     let headers_len = pe.opt.size_of_headers as usize;
     if headers_len > region.len() {
-        return Err(Error::Malformed { what: "size_of_headers", at: 0 });
+        return Err(Error::Malformed {
+            what: "size_of_headers",
+            at: 0,
+        });
     }
     let raw = pe.raw();
     let copy_from_header = headers_len.min(raw.len());
@@ -231,7 +238,10 @@ fn copy_section(sh: &SectionHeader, raw: &[u8], region: &Region) -> Result<()> {
         .map(|e| e > region.len())
         .unwrap_or(true)
     {
-        return Err(Error::Malformed { what: "section virtual range", at: dst_off });
+        return Err(Error::Malformed {
+            what: "section virtual range",
+            at: dst_off,
+        });
     }
 
     let raw_off = sh.pointer_to_raw_data as usize;
@@ -246,7 +256,10 @@ fn copy_section(sh: &SectionHeader, raw: &[u8], region: &Region) -> Result<()> {
                 at: raw_off,
             })?;
             if src_end > raw.len() {
-                return Err(Error::Malformed { what: "section raw oob", at: raw_off });
+                return Err(Error::Malformed {
+                    what: "section raw oob",
+                    at: raw_off,
+                });
             }
             core::ptr::copy_nonoverlapping(raw.as_ptr().add(raw_off), dst, raw_size);
         }
