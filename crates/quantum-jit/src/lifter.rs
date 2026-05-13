@@ -132,6 +132,11 @@ impl<'a> Lifter<'a> {
             Op::SubScalar => self.lift_scalar_fp(inst, FpOp::Sub),
             Op::MulScalar => self.lift_scalar_fp(inst, FpOp::Mul),
             Op::DivScalar => self.lift_scalar_fp(inst, FpOp::Div),
+            Op::CvtIntToScalar => self.lift_cvt_int_to_scalar(inst),
+            Op::CvtScalarToInt => self.lift_cvt_scalar_to_int(inst, false),
+            Op::CvtScalarToIntTrunc => self.lift_cvt_scalar_to_int(inst, true),
+            Op::CvtSsToSd => self.lift_cvt_precision(inst, true),
+            Op::CvtSdToSs => self.lift_cvt_precision(inst, false),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1109,6 +1114,153 @@ impl<'a> Lifter<'a> {
             OpSize::B8 => self.emitter.str_d(dst_v, Reg::x(28), off),
             OpSize::B4 => self.emitter.str_s(dst_v, Reg::x(28), off),
             _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        Ok(())
+    }
+
+    /// CVTSI2SS / CVTSI2SD — int (GPR or memory) → FP (XMM low slot).
+    /// The destination XMM's upper bits are preserved per x86 spec.
+    fn lift_cvt_int_to_scalar(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (dst_idx, fp_size) = match dst {
+            Operand::XmmReg(d, s) => (d, s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        // Get the int source into X17.
+        let int_size = match src {
+            Operand::Reg(rs, s) => {
+                self.emitter.mov64(Reg::X17, host_reg(rs));
+                s
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X16)?;
+                let s = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                self.load_sized(Reg::X17, Reg::X16, leftover, s);
+                s
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let scratch_v = Reg::x(16);
+        match (fp_size, int_size) {
+            (OpSize::B4, OpSize::B4) => self.emitter.scvtf_s_w(scratch_v, Reg::X17),
+            (OpSize::B4, OpSize::B8) => self.emitter.scvtf_s_x(scratch_v, Reg::X17),
+            (OpSize::B8, OpSize::B4) => self.emitter.scvtf_d_w(scratch_v, Reg::X17),
+            (OpSize::B8, OpSize::B8) => self.emitter.scvtf_d_x(scratch_v, Reg::X17),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        let off = Self::xmm_ctx_offset(dst_idx);
+        match fp_size {
+            OpSize::B4 => self.emitter.str_s(scratch_v, Reg::x(28), off),
+            OpSize::B8 => self.emitter.str_d(scratch_v, Reg::x(28), off),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        Ok(())
+    }
+
+    /// CVTSS2SI / CVTSD2SI (round) and CVTTSS2SI / CVTTSD2SI (truncate).
+    /// FP (XMM or memory) → int (GPR).
+    fn lift_cvt_scalar_to_int(&mut self, inst: &Inst, truncate: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let (rd, int_size) = match dst {
+            Operand::Reg(r, s) => (host_reg(r), s),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let scratch_v = Reg::x(16);
+        // Load the FP source into V16 as D or S.
+        let fp_size = match src {
+            Operand::XmmReg(s, sz) => {
+                match sz {
+                    OpSize::B8 => {
+                        self.emitter
+                            .ldr_d(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s))
+                    }
+                    OpSize::B4 => {
+                        self.emitter
+                            .ldr_s(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s))
+                    }
+                    _ => return Err(LifterError::Unsupported(inst.op)),
+                }
+                sz
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                let sz = match m {
+                    Operand::Mem(mm) => mm.size,
+                    Operand::RipRel(_, s) => s,
+                    _ => unreachable!(),
+                };
+                match sz {
+                    OpSize::B8 => self.emitter.ldr_d(scratch_v, Reg::X17, leftover),
+                    OpSize::B4 => self.emitter.ldr_s(scratch_v, Reg::X17, leftover),
+                    _ => return Err(LifterError::Unsupported(inst.op)),
+                }
+                sz
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        match (truncate, fp_size, int_size) {
+            (true, OpSize::B4, OpSize::B4) => self.emitter.fcvtzs_w_s(rd, scratch_v),
+            (true, OpSize::B4, OpSize::B8) => self.emitter.fcvtzs_x_s(rd, scratch_v),
+            (true, OpSize::B8, OpSize::B4) => self.emitter.fcvtzs_w_d(rd, scratch_v),
+            (true, OpSize::B8, OpSize::B8) => self.emitter.fcvtzs_x_d(rd, scratch_v),
+            (false, OpSize::B4, OpSize::B4) => self.emitter.fcvtns_w_s(rd, scratch_v),
+            (false, OpSize::B4, OpSize::B8) => self.emitter.fcvtns_x_s(rd, scratch_v),
+            (false, OpSize::B8, OpSize::B4) => self.emitter.fcvtns_w_d(rd, scratch_v),
+            (false, OpSize::B8, OpSize::B8) => self.emitter.fcvtns_x_d(rd, scratch_v),
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // For B4 dest, the upper 32 bits are zero-extended by AArch64's
+        // FCVT* writing to Wd which naturally zeroes upper bits of Xd.
+        Ok(())
+    }
+
+    /// CVTSS2SD / CVTSD2SS — FP precision conversion. `up` = single→double.
+    fn lift_cvt_precision(&mut self, inst: &Inst, up: bool) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let scratch_v = Reg::x(16);
+        // Load source into V16 at source width.
+        match src {
+            Operand::XmmReg(s, _) => {
+                if up {
+                    self.emitter
+                        .ldr_s(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s));
+                } else {
+                    self.emitter
+                        .ldr_d(scratch_v, Reg::x(28), Self::xmm_ctx_offset(s));
+                }
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                if up {
+                    self.emitter.ldr_s(scratch_v, Reg::X17, leftover);
+                } else {
+                    self.emitter.ldr_d(scratch_v, Reg::X17, leftover);
+                }
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        // FCVT D, S or FCVT S, D.
+        if up {
+            self.emitter.fcvt_d_s(scratch_v, scratch_v);
+        } else {
+            self.emitter.fcvt_s_d(scratch_v, scratch_v);
+        }
+        let off = Self::xmm_ctx_offset(dst_idx);
+        if up {
+            self.emitter.str_d(scratch_v, Reg::x(28), off);
+        } else {
+            self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
         Ok(())
     }

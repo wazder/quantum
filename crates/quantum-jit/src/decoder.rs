@@ -822,6 +822,56 @@ impl<'a> Decoder<'a> {
                 };
                 Ok(make(op, [Some(xmm), Some(rm), None], rip))
             }
+            // FP <-> int / FP <-> FP precision conversions.
+            //   F2 0F 2A /r CVTSI2SD xmm, r/m{32,64}
+            //   F3 0F 2A /r CVTSI2SS xmm, r/m{32,64}
+            //   F2 0F 2C /r CVTTSD2SI r{32,64}, xmm/m64  (truncate)
+            //   F3 0F 2C /r CVTTSS2SI r{32,64}, xmm/m32
+            //   F2 0F 2D /r CVTSD2SI  r{32,64}, xmm/m64  (round)
+            //   F3 0F 2D /r CVTSS2SI  r{32,64}, xmm/m32
+            //   F2 0F 5A /r CVTSD2SS  xmm, xmm/m64
+            //   F3 0F 5A /r CVTSS2SD  xmm, xmm/m32
+            0x2A if p.repne || p.repe => {
+                let fp_size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let int_size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm(p, int_size)?;
+                let xmm = Operand::XmmReg(reg, fp_size);
+                Ok(make(Op::CvtIntToScalar, [Some(xmm), Some(rm), None], rip))
+            }
+            0x2C if p.repne || p.repe => {
+                let fp_size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let int_size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, fp_size)?;
+                let int_reg = self.reg_operand(p, reg, int_size);
+                Ok(make(
+                    Op::CvtScalarToIntTrunc,
+                    [Some(int_reg), Some(rm), None],
+                    rip,
+                ))
+            }
+            0x2D if p.repne || p.repe => {
+                let fp_size = if p.repne { OpSize::B8 } else { OpSize::B4 };
+                let int_size = if p.rex.w { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, fp_size)?;
+                let int_reg = self.reg_operand(p, reg, int_size);
+                Ok(make(
+                    Op::CvtScalarToInt,
+                    [Some(int_reg), Some(rm), None],
+                    rip,
+                ))
+            }
+            0x5A if p.repne => {
+                // CVTSD2SS xmm, xmm/m64 — read 64-bit double, write 32-bit single.
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B4);
+                Ok(make(Op::CvtSdToSs, [Some(xmm), Some(rm), None], rip))
+            }
+            0x5A if p.repe => {
+                // CVTSS2SD xmm, xmm/m32.
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B4)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::CvtSsToSd, [Some(xmm), Some(rm), None], rip))
+            }
             // 0F 1F /0 multi-byte NOP (variable length)
             0x1F => {
                 let _ = self.decode_modrm(p, OpSize::B4)?;
@@ -1504,6 +1554,41 @@ mod tests {
         let i = dec(&[0xF3, 0x0F, 0x59, 0xC1]);
         assert_eq!(i.op, Op::MulScalar);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
+    }
+
+    #[test]
+    fn cvtsi2sd_xmm_eax() {
+        // F2 0F 2A C0 -> cvtsi2sd xmm0, eax
+        let i = dec(&[0xF2, 0x0F, 0x2A, 0xC0]);
+        assert_eq!(i.op, Op::CvtIntToScalar);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+    }
+
+    #[test]
+    fn cvtsi2sd_xmm_rax() {
+        // F2 48 0F 2A C0 -> cvtsi2sd xmm0, rax  (REX.W -> 64-bit source)
+        let i = dec(&[0xF2, 0x48, 0x0F, 0x2A, 0xC0]);
+        assert_eq!(i.op, Op::CvtIntToScalar);
+        assert_eq!(i.operands[1], Some(Operand::Reg(GpReg::Rax, OpSize::B8)));
+    }
+
+    #[test]
+    fn cvttss2si_eax_xmm() {
+        // F3 0F 2C C0 -> cvttss2si eax, xmm0
+        let i = dec(&[0xF3, 0x0F, 0x2C, 0xC0]);
+        assert_eq!(i.op, Op::CvtScalarToIntTrunc);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(0, OpSize::B4)));
+    }
+
+    #[test]
+    fn cvtss2sd_xmm_xmm() {
+        // F3 0F 5A C1 -> cvtss2sd xmm0, xmm1
+        let i = dec(&[0xF3, 0x0F, 0x5A, 0xC1]);
+        assert_eq!(i.op, Op::CvtSsToSd);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
     }
 

@@ -730,6 +730,71 @@ impl Emitter {
     pub fn fdiv_s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
         self.fp2src(0x1E20_1800, vd, vn, vm);
     }
+
+    // FP conversion ops. Encoding is "FP <-> integer conversion" or
+    // "FP precision conversion"; we just hand-encode each variant.
+    fn fp_cvt(&mut self, base: u32, rd: Reg, rn: Reg) {
+        let w = base | ((rn.0 as u32) << 5) | (rd.0 as u32);
+        self.push(w);
+    }
+
+    /// SCVTF Sd, Wn — signed int32 -> single.
+    pub fn scvtf_s_w(&mut self, vd: Reg, rn: Reg) {
+        self.fp_cvt(0x1E22_0000, vd, rn);
+    }
+    /// SCVTF Sd, Xn — signed int64 -> single.
+    pub fn scvtf_s_x(&mut self, vd: Reg, rn: Reg) {
+        self.fp_cvt(0x9E22_0000, vd, rn);
+    }
+    /// SCVTF Dd, Wn — signed int32 -> double.
+    pub fn scvtf_d_w(&mut self, vd: Reg, rn: Reg) {
+        self.fp_cvt(0x1E62_0000, vd, rn);
+    }
+    /// SCVTF Dd, Xn — signed int64 -> double.
+    pub fn scvtf_d_x(&mut self, vd: Reg, rn: Reg) {
+        self.fp_cvt(0x9E62_0000, vd, rn);
+    }
+
+    /// FCVTZS Wd, Sn — single -> signed int32 (truncate toward zero).
+    pub fn fcvtzs_w_s(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E38_0000, rd, vn);
+    }
+    /// FCVTZS Xd, Sn — single -> signed int64 (truncate).
+    pub fn fcvtzs_x_s(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x9E38_0000, rd, vn);
+    }
+    /// FCVTZS Wd, Dn — double -> signed int32 (truncate).
+    pub fn fcvtzs_w_d(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E78_0000, rd, vn);
+    }
+    /// FCVTZS Xd, Dn — double -> signed int64 (truncate).
+    pub fn fcvtzs_x_d(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x9E78_0000, rd, vn);
+    }
+
+    /// FCVTNS Wd, Sn — single -> signed int32 (nearest-ties-to-even,
+    /// matching x86 default MXCSR rounding).
+    pub fn fcvtns_w_s(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E20_0000, rd, vn);
+    }
+    pub fn fcvtns_x_s(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x9E20_0000, rd, vn);
+    }
+    pub fn fcvtns_w_d(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E60_0000, rd, vn);
+    }
+    pub fn fcvtns_x_d(&mut self, rd: Reg, vn: Reg) {
+        self.fp_cvt(0x9E60_0000, rd, vn);
+    }
+
+    /// FCVT Dd, Sn — single -> double precision.
+    pub fn fcvt_d_s(&mut self, vd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E22_C000, vd, vn);
+    }
+    /// FCVT Sd, Dn — double -> single precision.
+    pub fn fcvt_s_d(&mut self, vd: Reg, vn: Reg) {
+        self.fp_cvt(0x1E62_4000, vd, vn);
+    }
 }
 
 // =============== Load/Store pair ===============

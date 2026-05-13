@@ -202,6 +202,17 @@ pub enum Op {
     SubScalar,
     MulScalar,
     DivScalar,
+    /// CVTSI2SS / CVTSI2SD — int (GPR/m) to FP (XMM). Src OpSize
+    /// reports the int width (B4/B8); dst XMM OpSize reports FP width.
+    CvtIntToScalar,
+    /// CVTSS2SI / CVTSD2SI — FP to int with current rounding mode.
+    CvtScalarToInt,
+    /// CVTTSS2SI / CVTTSD2SI — FP to int with truncation toward zero.
+    CvtScalarToIntTrunc,
+    /// CVTSS2SD — single → double.
+    CvtSsToSd,
+    /// CVTSD2SS — double → single.
+    CvtSdToSs,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,
