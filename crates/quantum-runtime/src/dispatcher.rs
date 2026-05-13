@@ -88,37 +88,55 @@ pub unsafe fn invoke_block_with_ctx(host_code: NonNull<u8>, ctx: &mut GuestConte
     f(ctx)
 }
 
+/// The runtime's block/code-cache state. Interior mutability via Mutex
+/// so multiple threads can share a single `Dispatcher` for lookup and
+/// install — required as soon as guest CreateThread spawns workers.
 pub struct Dispatcher {
-    pub code_cache: CodeCache,
-    pub block_map: BTreeMap<u64, NonNull<u8>>,
+    inner: std::sync::Mutex<DispatcherInner>,
+}
+
+struct DispatcherInner {
+    code_cache: CodeCache,
+    block_map: BTreeMap<u64, NonNull<u8>>,
 }
 
 // SAFETY: the dispatcher owns its code cache and pointers within it.
 // The `NonNull<u8>` values are never dereferenced except through host
-// indirect-call instructions in the JIT execution path.
+// indirect-call instructions in the JIT execution path. The Mutex
+// serializes all mutation; the NonNull pointers are stable for the
+// life of the dispatcher.
 unsafe impl Send for Dispatcher {}
+unsafe impl Sync for Dispatcher {}
 
 impl Dispatcher {
     pub fn new(cache_size: usize) -> Result<Self> {
         Ok(Self {
-            code_cache: CodeCache::new(cache_size)?,
-            block_map: BTreeMap::new(),
+            inner: std::sync::Mutex::new(DispatcherInner {
+                code_cache: CodeCache::new(cache_size)?,
+                block_map: BTreeMap::new(),
+            }),
         })
     }
 
     pub fn lookup(&self, guest_rip: u64) -> Option<NonNull<u8>> {
-        self.block_map.get(&guest_rip).copied()
+        self.inner
+            .lock()
+            .unwrap()
+            .block_map
+            .get(&guest_rip)
+            .copied()
     }
 
-    pub fn install(&mut self, guest_rip: u64, host_bytes: &[u8]) -> Result<NonNull<u8>> {
-        let ptr = self.code_cache.install(host_bytes)?;
-        self.block_map.insert(guest_rip, ptr);
+    pub fn install(&self, guest_rip: u64, host_bytes: &[u8]) -> Result<NonNull<u8>> {
+        let mut inner = self.inner.lock().unwrap();
+        let ptr = inner.code_cache.install(host_bytes)?;
+        inner.block_map.insert(guest_rip, ptr);
         Ok(ptr)
     }
 
     /// Number of cached blocks.
     pub fn block_count(&self) -> usize {
-        self.block_map.len()
+        self.inner.lock().unwrap().block_map.len()
     }
 }
 
@@ -156,7 +174,7 @@ mod tests {
         bytes[0..4].copy_from_slice(&movz.to_le_bytes());
         bytes[4..8].copy_from_slice(&ret.to_le_bytes());
 
-        let mut disp = Dispatcher::new(4096).expect("dispatcher");
+        let disp = Dispatcher::new(4096).expect("dispatcher");
         let ptr = disp.install(0x1000, &bytes).expect("install");
         assert_eq!(disp.block_count(), 1);
         assert!(disp.lookup(0x1000).is_some());

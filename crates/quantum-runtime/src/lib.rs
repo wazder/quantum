@@ -5,7 +5,10 @@
 //! Centralising this lets us swap the syscall path (e.g. raw `svc #0x80`) and
 //! enforce the from-scratch principle.
 
-#![cfg_attr(not(test), no_std)]
+// no_std was aspirational; we use mach_vm + pthread via Apple FFI plus
+// std::sync for the cross-thread Dispatcher mutex, so the crate is
+// effectively hosted-std now. The `alloc` extern stays for legacy
+// imports inside modules that haven't been switched yet.
 
 extern crate alloc;
 

@@ -106,7 +106,7 @@ fn run_pe_from_disk_returns_exit_code() {
     let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
     ctx.gprs[4] = stack.top();
-    let mut disp = Dispatcher::new(16384).expect("dispatcher");
+    let disp = Dispatcher::new(16384).expect("dispatcher");
     let entry_va = image.actual_base + image.entry_rva as u64;
 
     let exit_code = run_with_exit_trap(|| {

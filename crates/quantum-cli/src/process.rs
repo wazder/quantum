@@ -199,7 +199,7 @@ fn load_side_dlls(
 /// whole sequence — the inner trap longjmps to its own setjmp slot
 /// (saved/restored by the trap helper) and the outer caller's trap
 /// state is untouched.
-fn init_side_module(disp: &mut Dispatcher, sm: &SideModule, ctx: &mut GuestContext, trace: bool) {
+fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, trace: bool) {
     if let Ok(Some(tls)) = quantum_loader::tls::parse(&sm.image) {
         for cb_rva in &tls.callbacks {
             let cb_va = sm.image.actual_base + *cb_rva as u64;
@@ -378,7 +378,7 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
     let mut ctx = GuestContext::default();
     ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
 
-    let mut disp = Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?;
+    let disp = Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?;
     let entry_va = image.actual_base + image.entry_rva as u64;
     if trace {
         eprintln!("[trace] entering JIT at {entry_va:#x}");
@@ -393,7 +393,7 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
     let mut exit_code = run_with_exit_trap(|| {
         if run_dll_init {
             for sm in &side_modules {
-                init_side_module(&mut disp, sm, &mut ctx, trace);
+                init_side_module(&disp, sm, &mut ctx, trace);
             }
             if let Ok(Some(tls)) = quantum_loader::tls::parse(&image) {
                 for cb_rva in &tls.callbacks {
@@ -404,11 +404,11 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
                     ctx.gprs[1] = image.actual_base;
                     ctx.gprs[2] = 1;
                     ctx.gprs[8] = 0;
-                    let _ = invoke_guest_function(&mut disp, &image, &mut ctx, cb_va);
+                    let _ = invoke_guest_function(&disp, &image, &mut ctx, cb_va);
                 }
             }
         }
-        if let Err(e) = run_dispatcher_loop(&mut disp, &image, &mut ctx, entry_va) {
+        if let Err(e) = run_dispatcher_loop(&disp, &image, &mut ctx, entry_va) {
             eprintln!("[trace] dispatcher: {e}");
         }
     });
@@ -426,14 +426,7 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
             None => break,
         };
         last_crash = Some(crash);
-        if !dispatch_seh(
-            &mut disp,
-            &image,
-            &mut ctx,
-            &crash,
-            &runtime_functions,
-            trace,
-        ) {
+        if !dispatch_seh(&disp, &image, &mut ctx, &crash, &runtime_functions, trace) {
             break;
         }
         // A handler returned EXCEPTION_CONTINUE_EXECUTION. Resume the
@@ -443,7 +436,7 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
             eprintln!("[trace] SEH resume @ {resume_rip:#x}");
         }
         exit_code = run_with_exit_trap(|| {
-            if let Err(e) = run_dispatcher_loop(&mut disp, &image, &mut ctx, resume_rip) {
+            if let Err(e) = run_dispatcher_loop(&disp, &image, &mut ctx, resume_rip) {
                 eprintln!("[trace] dispatcher: {e}");
             }
         });
@@ -493,7 +486,7 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
 /// we copy them back into `ctx` so the resumed dispatcher sees the
 /// requested state.
 fn dispatch_seh(
-    disp: &mut Dispatcher,
+    disp: &Dispatcher,
     image: &LoadedImage,
     ctx: &mut GuestContext,
     crash: &quantum_kernel32::process::CrashInfo,
@@ -674,7 +667,7 @@ fn dispatch_seh(
 /// guest stack so the function's RET lands back at the dispatcher
 /// exit. After return, RSP is naturally restored by the callee's RET.
 pub fn invoke_guest_function(
-    disp: &mut Dispatcher,
+    disp: &Dispatcher,
     image: &LoadedImage,
     ctx: &mut GuestContext,
     fn_rip: u64,
@@ -692,7 +685,7 @@ pub fn invoke_guest_function(
 }
 
 fn run_dispatcher_loop(
-    disp: &mut Dispatcher,
+    disp: &Dispatcher,
     image: &LoadedImage,
     ctx: &mut GuestContext,
     start_rip: u64,
