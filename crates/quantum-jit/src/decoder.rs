@@ -770,6 +770,38 @@ impl<'a> Decoder<'a> {
                 let xmm = Operand::XmmReg(reg, OpSize::B8);
                 Ok(make(Op::MovqXmm, [Some(xmm), Some(rm), None], rip))
             }
+            // 66 0F 6F /r MOVDQA xmm, xmm/m128
+            // F3 0F 6F /r MOVDQU xmm, xmm/m128
+            0x6F if p.osize || p.repe => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::MovdqXmm, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F 7F /r MOVDQA xmm/m128, xmm
+            // F3 0F 7F /r MOVDQU xmm/m128, xmm
+            0x7F if p.osize || p.repe => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::MovdqXmm, [Some(rm), Some(xmm), None], rip))
+            }
+            // 66 0F EF /r PXOR xmm, xmm/m128
+            0xEF if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PxorXmm, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F DB /r PAND xmm, xmm/m128
+            0xDB if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PandXmm, [Some(xmm), Some(rm), None], rip))
+            }
+            // 66 0F EB /r POR xmm, xmm/m128
+            0xEB if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(Op::PorXmm, [Some(xmm), Some(rm), None], rip))
+            }
             // 0F 1F /0 multi-byte NOP (variable length)
             0x1F => {
                 let _ = self.decode_modrm(p, OpSize::B4)?;
@@ -1409,6 +1441,32 @@ mod tests {
         assert_eq!(i.op, Op::MovsdXmm);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn movdqa_xmm_xmm() {
+        // 66 0F 6F C1 -> movdqa xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x6F, 0xC1]);
+        assert_eq!(i.op, Op::MovdqXmm);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn movdqu_xmm_mem() {
+        // F3 0F 6F 04 24 -> movdqu xmm0, [rsp]
+        let i = dec(&[0xF3, 0x0F, 0x6F, 0x04, 0x24]);
+        assert_eq!(i.op, Op::MovdqXmm);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+    }
+
+    #[test]
+    fn pxor_xmm_xmm() {
+        // 66 0F EF C0 -> pxor xmm0, xmm0  (zero idiom)
+        let i = dec(&[0x66, 0x0F, 0xEF, 0xC0]);
+        assert_eq!(i.op, Op::PxorXmm);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(0, OpSize::B8)));
     }
 
     #[test]

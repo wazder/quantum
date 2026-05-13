@@ -124,6 +124,10 @@ impl<'a> Lifter<'a> {
             Op::MovqXmm => self.lift_movq_xmm(inst),
             Op::MovsdXmm => self.lift_movsd_xmm(inst),
             Op::MovssXmm => self.lift_movss_xmm(inst),
+            Op::MovdqXmm => self.lift_movdq_xmm(inst),
+            Op::PxorXmm => self.lift_packed_logical(inst, PackedLogic::Xor),
+            Op::PandXmm => self.lift_packed_logical(inst, PackedLogic::And),
+            Op::PorXmm => self.lift_packed_logical(inst, PackedLogic::Or),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -963,6 +967,82 @@ impl<'a> Lifter<'a> {
         }
     }
 
+    /// MOVDQA / MOVDQU — 128-bit packed move. Aligned/unaligned variants
+    /// share semantics on Apple Silicon (unaligned loads are free), so
+    /// we collapse them into a single op. Uses NEON Q-reg loads/stores.
+    fn lift_movdq_xmm(&mut self, inst: &Inst) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        // V16 scratch (matches the X16 scratch index — V/X are separate
+        // register banks but using the same index is a cheap convention).
+        let scratch = Reg::x(16);
+        match (dst, src) {
+            (Operand::XmmReg(d, _), Operand::XmmReg(s, _)) => {
+                self.emitter
+                    .ldr_q(scratch, Reg::x(28), Self::xmm_ctx_offset(s));
+                self.emitter
+                    .str_q(scratch, Reg::x(28), Self::xmm_ctx_offset(d));
+                Ok(())
+            }
+            (Operand::XmmReg(d, _), m @ (Operand::Mem(_) | Operand::RipRel(_, _))) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(scratch, Reg::X17, leftover);
+                self.emitter
+                    .str_q(scratch, Reg::x(28), Self::xmm_ctx_offset(d));
+                Ok(())
+            }
+            (m @ (Operand::Mem(_) | Operand::RipRel(_, _)), Operand::XmmReg(s, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter
+                    .ldr_q(scratch, Reg::x(28), Self::xmm_ctx_offset(s));
+                self.emitter.str_q(scratch, Reg::X17, leftover);
+                Ok(())
+            }
+            _ => Err(LifterError::Unsupported(Op::MovdqXmm)),
+        }
+    }
+
+    /// PXOR / PAND / POR — 128-bit packed bitwise op of the form
+    /// `xmm_dst = xmm_dst <op> xmm_src_or_mem`. Lowered to NEON
+    /// EOR/AND/ORR Vd.16B, Vd.16B, Vm.16B via two scratch Q registers
+    /// (V16 = dst, V17 = src).
+    fn lift_packed_logical(&mut self, inst: &Inst, op: PackedLogic) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        // Load destination XMM into V16.
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        // Load source into V17 — either another XMM or a memory operand.
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                // We just clobbered X17 for the address — load Q from
+                // [X17, #leftover] into V17 (same encoding number).
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        match op {
+            PackedLogic::Xor => self.emitter.eor_v16b(dst_v, dst_v, src_v),
+            PackedLogic::And => self.emitter.and_v16b(dst_v, dst_v, src_v),
+            PackedLogic::Or => self.emitter.orr_v16b(dst_v, dst_v, src_v),
+        }
+        // Store back to dst slot.
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        Ok(())
+    }
+
     /// BSR / BSF — bit-scan reverse / forward.
     /// BSR: index of highest set bit (=> 63 - clz(x) for B8, 31 - clz(x) for B4).
     /// BSF: index of lowest set bit (=> clz(rbit(x))).
@@ -1745,6 +1825,13 @@ enum DivMulKind {
 
 #[derive(Debug, Clone, Copy)]
 enum BitOp {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PackedLogic {
+    Xor,
     And,
     Or,
 }

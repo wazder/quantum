@@ -187,6 +187,15 @@ pub enum Op {
     MovqXmm,
     MovsdXmm,
     MovssXmm,
+    /// 128-bit packed move (covers both MOVDQA aligned and MOVDQU
+    /// unaligned — they share semantics on modern hardware).
+    MovdqXmm,
+    /// 128-bit packed bitwise XOR.
+    PxorXmm,
+    /// 128-bit packed bitwise AND.
+    PandXmm,
+    /// 128-bit packed bitwise OR.
+    PorXmm,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

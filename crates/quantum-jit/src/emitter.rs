@@ -663,6 +663,30 @@ impl Emitter {
         debug_assert!(offset.is_multiple_of(4));
         self.ldst_uoff(0b10, 1, 0b00, offset / 4, rn, vt);
     }
+
+    // NEON three-same SIMD logical ops on 16B (128-bit) vectors. These
+    // implement the packed bitwise SSE2 ops directly: PXOR, PAND, POR,
+    // and the "vector MOV" alias we use for MOVDQA/MOVDQU register
+    // copies.
+
+    /// EOR Vd.16B, Vn.16B, Vm.16B — 128-bit XOR.
+    pub fn eor_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E20_1C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// AND Vd.16B, Vn.16B, Vm.16B — 128-bit AND.
+    pub fn and_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4E20_1C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+
+    /// ORR Vd.16B, Vn.16B, Vm.16B — 128-bit OR.
+    /// Aliasing ORR Vd, Vn, Vn yields a MOV.16B (vector copy).
+    pub fn orr_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x4EA0_1C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============
