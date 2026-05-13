@@ -12,6 +12,10 @@ use quantum_core::Error as CoreError;
 use quantum_jit::block;
 use quantum_kernel32::process::{run_with_exit_trap, take_crash_info};
 use quantum_kernel32::resolve;
+use quantum_kernel32::seh::{
+    self, Context as Win64Context, EXCEPTION_ACCESS_VIOLATION, EXCEPTION_BREAKPOINT,
+    EXCEPTION_CONTINUE_EXECUTION, EXCEPTION_CONTINUE_SEARCH, ExceptionPointers, ExceptionRecord,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Last guest RIP entered by the dispatcher loop. Updated immediately
@@ -109,14 +113,43 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
         eprintln!("[trace] entering JIT at {entry_va:#x}");
     }
 
-    let exit_code = run_with_exit_trap(|| {
+    let mut exit_code = run_with_exit_trap(|| {
         if let Err(e) = run_dispatcher_loop(&mut disp, &image, &mut ctx, entry_va) {
             eprintln!("[trace] dispatcher: {e}");
         }
     });
 
+    // If the guest faulted (sentinel exit code from the crash handler),
+    // try dispatching to a registered SEH filter or vectored handler.
+    // The dispatcher may loop here several times if a filter returns
+    // EXCEPTION_CONTINUE_EXECUTION and execution faults again.
+    let mut last_crash: Option<quantum_kernel32::process::CrashInfo> = None;
+    let mut seh_attempts = 0;
+    while exit_code == 0xFFFF_FFFE && seh_attempts < 16 {
+        seh_attempts += 1;
+        let crash = match take_crash_info() {
+            Some(c) => c,
+            None => break,
+        };
+        last_crash = Some(crash);
+        if !dispatch_seh(&mut disp, &image, &mut ctx, &crash, trace) {
+            break;
+        }
+        // A handler returned EXCEPTION_CONTINUE_EXECUTION. Resume the
+        // dispatcher loop from the (possibly-mutated) ctx.rip.
+        let resume_rip = ctx.rip;
+        if trace {
+            eprintln!("[trace] SEH resume @ {resume_rip:#x}");
+        }
+        exit_code = run_with_exit_trap(|| {
+            if let Err(e) = run_dispatcher_loop(&mut disp, &image, &mut ctx, resume_rip) {
+                eprintln!("[trace] dispatcher: {e}");
+            }
+        });
+    }
+
     if trace {
-        if let Some(crash) = take_crash_info() {
+        if let Some(crash) = last_crash.or_else(take_crash_info) {
             eprintln!(
                 "[trace] FATAL signal {}: fault_addr={:#x}, host_pc={:#x}, last_guest_rip={:#x}",
                 crash.sig,
@@ -145,6 +178,157 @@ pub fn run_pe(bytes: &[u8]) -> Result<u32, RunError> {
         eprintln!("[trace] exited; code={exit_code:#x}");
     }
     Ok(exit_code)
+}
+
+/// On a faulted dispatcher exit, walk vectored handlers + the
+/// registered unhandled-exception filter. Each handler is called via
+/// `invoke_guest_function` with `RCX = &EXCEPTION_POINTERS`. Returns
+/// `true` if a handler returned `EXCEPTION_CONTINUE_EXECUTION` (caller
+/// should resume); `false` otherwise (caller should propagate the
+/// fault).
+///
+/// The CONTEXT structure is heap-allocated here and a mutable pointer
+/// is handed to the guest. If the handler mutates fields (Rip / GPRs)
+/// we copy them back into `ctx` so the resumed dispatcher sees the
+/// requested state.
+fn dispatch_seh(
+    disp: &mut Dispatcher,
+    image: &LoadedImage,
+    ctx: &mut GuestContext,
+    crash: &quantum_kernel32::process::CrashInfo,
+    trace: bool,
+) -> bool {
+    let exception_code = match crash.sig {
+        5 => EXCEPTION_BREAKPOINT, // SIGTRAP = int3
+        11 | 10 => EXCEPTION_ACCESS_VIOLATION,
+        4 => 0xC000_001D, // SIGILL -> EXCEPTION_ILLEGAL_INSTRUCTION
+        _ => return false,
+    };
+
+    let crash_gprs = crash.to_guest_gprs();
+    let mut record = Box::new(ExceptionRecord {
+        exception_code,
+        exception_address: crash.host_pc as *mut _,
+        ..ExceptionRecord::default()
+    });
+    let mut context = Box::new(Win64Context::from_guest_gprs(
+        &crash_gprs,
+        // For int3 the saved RIP is one past the int3; for SIGSEGV the
+        // host PC is the faulting JIT instruction which doesn't map
+        // cleanly to a guest RIP. We use last_guest_rip as a best
+        // approximation — vectored handlers typically read CONTEXT.Rip
+        // to identify the trap site.
+        LAST_ENTERED_RIP.load(Ordering::SeqCst),
+        ctx.flags,
+    ));
+    let pointers = Box::new(ExceptionPointers {
+        exception_record: &mut *record as *mut _,
+        context_record: &mut *context as *mut _,
+    });
+    let pointers_ptr = &*pointers as *const ExceptionPointers as u64;
+
+    // Refresh ctx GPRs from the trap state so the handler sees the
+    // same values it would on real Windows.
+    ctx.gprs = crash_gprs;
+    ctx.rip = LAST_ENTERED_RIP.load(Ordering::SeqCst);
+
+    // Walk vectored handlers first (Windows calls them before SEH frames).
+    for handler in seh::vectored_handlers_snapshot() {
+        if trace {
+            eprintln!(
+                "[trace] SEH: invoking vectored handler @ {:#x}",
+                handler.callback
+            );
+        }
+        // Set RCX = &EXCEPTION_POINTERS per Win64 ABI for the handler signature
+        //   LONG (*)(EXCEPTION_POINTERS*)
+        ctx.gprs[1] = pointers_ptr;
+        let disposition = match invoke_guest_function(disp, image, ctx, handler.callback) {
+            Ok(rax) => rax as i32,
+            Err(e) => {
+                if trace {
+                    eprintln!("[trace] SEH: vectored handler errored: {e}");
+                }
+                return false;
+            }
+        };
+        if disposition == EXCEPTION_CONTINUE_EXECUTION {
+            if trace {
+                eprintln!(
+                    "[trace] SEH: vectored handler returned CONTINUE_EXECUTION (new Rip={:#x})",
+                    context.rip
+                );
+            }
+            let (rip, flags) = context.into_guest_gprs(&mut ctx.gprs);
+            ctx.rip = rip;
+            ctx.flags = flags;
+            return true;
+        }
+        if disposition == EXCEPTION_CONTINUE_SEARCH {
+            continue; // Try next handler.
+        }
+        // Any other return is treated as "stop dispatching".
+        break;
+    }
+
+    // Then the unhandled-exception filter, if any.
+    let filter = quantum_kernel32::stubs::registered_unhandled_filter();
+    if filter != 0 {
+        if trace {
+            eprintln!("[trace] SEH: invoking unhandled filter @ {filter:#x}");
+        }
+        ctx.gprs[1] = pointers_ptr;
+        let disposition = match invoke_guest_function(disp, image, ctx, filter) {
+            Ok(rax) => rax as i32,
+            Err(e) => {
+                if trace {
+                    eprintln!("[trace] SEH: unhandled filter errored: {e}");
+                }
+                return false;
+            }
+        };
+        if disposition == EXCEPTION_CONTINUE_EXECUTION {
+            if trace {
+                eprintln!(
+                    "[trace] SEH: unhandled filter returned CONTINUE_EXECUTION (new Rip={:#x})",
+                    context.rip
+                );
+            }
+            let (rip, flags) = context.into_guest_gprs(&mut ctx.gprs);
+            ctx.rip = rip;
+            ctx.flags = flags;
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Run a guest function to completion and return its `rax` value.
+///
+/// Used by the future SEH dispatcher to invoke a registered exception
+/// filter or vectored handler from outside the main dispatcher loop.
+/// The caller must have set up `ctx.gprs[1..]` with the function's
+/// Win64 arguments (RCX/RDX/R8/R9) before calling. `ctx.gprs[4]` (RSP)
+/// is decremented by 8 here and the STOP_SENTINEL is pushed onto the
+/// guest stack so the function's RET lands back at the dispatcher
+/// exit. After return, RSP is naturally restored by the callee's RET.
+pub fn invoke_guest_function(
+    disp: &mut Dispatcher,
+    image: &LoadedImage,
+    ctx: &mut GuestContext,
+    fn_rip: u64,
+) -> Result<u64, RunError> {
+    // Push a fake return address so the callee's RET pops STOP_SENTINEL
+    // and exits the dispatcher cleanly.
+    ctx.gprs[4] = ctx.gprs[4].wrapping_sub(8);
+    // SAFETY: ctx.gprs[4] points into the guest stack which is real
+    // host memory we allocated via MachVmManager.
+    unsafe {
+        *(ctx.gprs[4] as *mut u64) = STOP_SENTINEL;
+    }
+    run_dispatcher_loop(disp, image, ctx, fn_rip)?;
+    Ok(ctx.gprs[0])
 }
 
 fn run_dispatcher_loop(
