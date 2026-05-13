@@ -784,6 +784,34 @@ impl<'a> Decoder<'a> {
                 let xmm = Operand::XmmReg(reg, OpSize::B8);
                 Ok(make(Op::MovdqXmm, [Some(rm), Some(xmm), None], rip))
             }
+            // 66 0F 74/75/76 /r PCMPEQB/W/D — per-lane integer compare-equal.
+            0x74 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(
+                    Op::PcmpeqLane(OpSize::B1),
+                    [Some(xmm), Some(rm), None],
+                    rip,
+                ))
+            }
+            0x75 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(
+                    Op::PcmpeqLane(OpSize::B2),
+                    [Some(xmm), Some(rm), None],
+                    rip,
+                ))
+            }
+            0x76 if p.osize => {
+                let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
+                let xmm = Operand::XmmReg(reg, OpSize::B8);
+                Ok(make(
+                    Op::PcmpeqLane(OpSize::B4),
+                    [Some(xmm), Some(rm), None],
+                    rip,
+                ))
+            }
             // 66 0F EF /r PXOR xmm, xmm/m128
             0xEF if p.osize => {
                 let (rm, reg) = self.decode_modrm_xmm(p, OpSize::B8)?;
@@ -1724,6 +1752,29 @@ mod tests {
         assert_eq!(i.op, Op::MulPacked);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn pcmpeqb_xmm_xmm() {
+        // 66 0F 74 C1 -> pcmpeqb xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x74, 0xC1]);
+        assert_eq!(i.op, Op::PcmpeqLane(OpSize::B1));
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
+    }
+
+    #[test]
+    fn pcmpeqw_xmm_xmm() {
+        // 66 0F 75 C1 -> pcmpeqw xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x75, 0xC1]);
+        assert_eq!(i.op, Op::PcmpeqLane(OpSize::B2));
+    }
+
+    #[test]
+    fn pcmpeqd_xmm_xmm() {
+        // 66 0F 76 C1 -> pcmpeqd xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x76, 0xC1]);
+        assert_eq!(i.op, Op::PcmpeqLane(OpSize::B4));
     }
 
     #[test]

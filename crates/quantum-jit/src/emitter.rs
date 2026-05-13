@@ -928,6 +928,28 @@ impl Emitter {
         let w = 0x6E60_FC00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
         self.push(w);
     }
+
+    // Packed integer compare-equal. Three-same SIMD with U=1, opcode=10001.
+    /// CMEQ Vd.16B, Vn.16B, Vm.16B — per-byte equal compare.
+    pub fn cmeq_v16b(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E20_8C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// CMEQ Vd.8H, Vn.8H, Vm.8H — per-halfword.
+    pub fn cmeq_v8h(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6E60_8C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// CMEQ Vd.4S, Vn.4S, Vm.4S — per-word (32-bit).
+    pub fn cmeq_v4s(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6EA0_8C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
+    /// CMEQ Vd.2D, Vn.2D, Vm.2D — per-doubleword (64-bit).
+    pub fn cmeq_v2d(&mut self, vd: Reg, vn: Reg, vm: Reg) {
+        let w = 0x6EE0_8C00 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5) | (vd.0 as u32);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============

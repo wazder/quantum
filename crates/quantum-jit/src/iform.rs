@@ -237,6 +237,9 @@ pub enum Op {
     SubPacked,
     MulPacked,
     DivPacked,
+    /// Packed integer compare-equal. Lane width B1 / B2 / B4 / B8.
+    /// Result lanes are all-ones on equal, all-zero otherwise.
+    PcmpeqLane(OpSize),
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

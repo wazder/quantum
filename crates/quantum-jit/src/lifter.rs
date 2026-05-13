@@ -152,6 +152,7 @@ impl<'a> Lifter<'a> {
             Op::SubPacked => self.lift_packed_fp(inst, FpPackedOp::Sub),
             Op::MulPacked => self.lift_packed_fp(inst, FpPackedOp::Mul),
             Op::DivPacked => self.lift_packed_fp(inst, FpPackedOp::Div),
+            Op::PcmpeqLane(lane) => self.lift_pcmpeq(inst, lane),
             Op::Shl => self.lift_shift(inst, ShiftDir::Left),
             Op::Shr => self.lift_shift(inst, ShiftDir::Right),
             Op::Sar => self.lift_shift(inst, ShiftDir::ArithRight),
@@ -1281,6 +1282,42 @@ impl<'a> Lifter<'a> {
         } else {
             self.emitter.str_s(scratch_v, Reg::x(28), off);
         }
+        Ok(())
+    }
+
+    /// PCMPEQB / PCMPEQW / PCMPEQD — per-lane integer compare-equal.
+    /// Each result lane is 0xFF.. (all-ones) on match, else 0. NEON
+    /// CMEQ at the matching lane width.
+    fn lift_pcmpeq(&mut self, inst: &Inst, lane: OpSize) -> LifterResult<()> {
+        let dst = inst.operands[0].ok_or(LifterError::BadOperands)?;
+        let src = inst.operands[1].ok_or(LifterError::BadOperands)?;
+        let dst_idx = match dst {
+            Operand::XmmReg(d, _) => d,
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        };
+        let dst_v = Reg::x(16);
+        let src_v = Reg::x(17);
+        self.emitter
+            .ldr_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
+        match src {
+            Operand::XmmReg(s, _) => {
+                self.emitter
+                    .ldr_q(src_v, Reg::x(28), Self::xmm_ctx_offset(s));
+            }
+            m @ (Operand::Mem(_) | Operand::RipRel(_, _)) => {
+                let leftover = self.addr_into_xtmp(&m, inst, Reg::X17)?;
+                self.emitter.ldr_q(src_v, Reg::X17, leftover);
+            }
+            _ => return Err(LifterError::Unsupported(inst.op)),
+        }
+        match lane {
+            OpSize::B1 => self.emitter.cmeq_v16b(dst_v, dst_v, src_v),
+            OpSize::B2 => self.emitter.cmeq_v8h(dst_v, dst_v, src_v),
+            OpSize::B4 => self.emitter.cmeq_v4s(dst_v, dst_v, src_v),
+            OpSize::B8 => self.emitter.cmeq_v2d(dst_v, dst_v, src_v),
+        }
+        self.emitter
+            .str_q(dst_v, Reg::x(28), Self::xmm_ctx_offset(dst_idx));
         Ok(())
     }
 
