@@ -213,6 +213,9 @@ pub enum Op {
     CvtSsToSd,
     /// CVTSD2SS — double → single.
     CvtSdToSs,
+    /// UCOMISS / UCOMISD — unordered FP compare; sets ZF/PF/CF.
+    /// Operand width on the XMM distinguishes SS (B4) from SD (B8).
+    UcomisScalar,
     /// Decoder bailout — opcode recognised but not lifted yet. Stores the
     /// raw byte length so callers can advance the IP.
     Unhandled,

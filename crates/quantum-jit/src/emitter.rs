@@ -795,6 +795,19 @@ impl Emitter {
     pub fn fcvt_s_d(&mut self, vd: Reg, vn: Reg) {
         self.fp_cvt(0x1E62_4000, vd, vn);
     }
+
+    /// FCMP Sn, Sm — single-precision compare; sets NZCV.
+    /// Encoding: 00011110 00 1 Rm 001000 Rn 00000
+    pub fn fcmp_s(&mut self, vn: Reg, vm: Reg) {
+        let w = 0x1E20_2000 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5);
+        self.push(w);
+    }
+
+    /// FCMP Dn, Dm — double-precision compare; sets NZCV.
+    pub fn fcmp_d(&mut self, vn: Reg, vm: Reg) {
+        let w = 0x1E60_2000 | ((vm.0 as u32) << 16) | ((vn.0 as u32) << 5);
+        self.push(w);
+    }
 }
 
 // =============== Load/Store pair ===============

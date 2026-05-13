@@ -872,6 +872,17 @@ impl<'a> Decoder<'a> {
                 let xmm = Operand::XmmReg(reg, OpSize::B8);
                 Ok(make(Op::CvtSsToSd, [Some(xmm), Some(rm), None], rip))
             }
+            //   NP 0F 2E /r UCOMISS xmm, xmm/m32
+            //   66 0F 2E /r UCOMISD xmm, xmm/m64
+            // Note: COMISS/COMISD (0F 2F) differ only in NaN-signaling
+            // behaviour; we collapse them into UCOMIS for now since the
+            // post-compare flag layout is the same.
+            0x2E | 0x2F if !p.repne && !p.repe => {
+                let size = if p.osize { OpSize::B8 } else { OpSize::B4 };
+                let (rm, reg) = self.decode_modrm_xmm(p, size)?;
+                let xmm = Operand::XmmReg(reg, size);
+                Ok(make(Op::UcomisScalar, [Some(xmm), Some(rm), None], rip))
+            }
             // 0F 1F /0 multi-byte NOP (variable length)
             0x1F => {
                 let _ = self.decode_modrm(p, OpSize::B4)?;
@@ -1590,6 +1601,24 @@ mod tests {
         assert_eq!(i.op, Op::CvtSsToSd);
         assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
         assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
+    }
+
+    #[test]
+    fn ucomiss_xmm_xmm() {
+        // 0F 2E C1 -> ucomiss xmm0, xmm1
+        let i = dec(&[0x0F, 0x2E, 0xC1]);
+        assert_eq!(i.op, Op::UcomisScalar);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B4)));
+    }
+
+    #[test]
+    fn ucomisd_xmm_xmm() {
+        // 66 0F 2E C1 -> ucomisd xmm0, xmm1
+        let i = dec(&[0x66, 0x0F, 0x2E, 0xC1]);
+        assert_eq!(i.op, Op::UcomisScalar);
+        assert_eq!(i.operands[0], Some(Operand::XmmReg(0, OpSize::B8)));
+        assert_eq!(i.operands[1], Some(Operand::XmmReg(1, OpSize::B8)));
     }
 
     #[test]
