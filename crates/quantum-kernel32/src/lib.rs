@@ -11,6 +11,7 @@ pub mod heap;
 pub mod io;
 pub mod modules;
 pub mod process;
+pub mod seh;
 pub mod steam;
 pub mod stubs;
 pub mod sync;
