@@ -8,11 +8,21 @@ the dependency tree.
 
 ## What works today
 
-The end-to-end pipeline is alive. `cargo test -p quantum-cli --test
-e2e_exit_process` hand-assembles a real Win64 PE — DOS header, COFF,
+The end-to-end pipeline is alive. Four e2e tests hand-assemble real
+Win64 PE byte buffers and run them through the entire stack:
+
+| Test | Guest program | Proves |
+|------|---------------|--------|
+| `e2e_exit_process` | `mov ecx, 42; call [iat_exit]; ud2` | Loader + JIT + ExitProcess |
+| `e2e_write_then_exit` | `WriteFile(stdout, "hello, quantum\n", ...); ExitProcess(0)` | Multi-arg Win64→AAPCS64 marshalling, real stdout I/O |
+| `e2e_loop` | Counter loop with `jnz rel8`, `r8d += 7` × 10 | Intra-block backward branches (`block::translate`) |
+| `e2e_push_pop` | `push rcx; ... ; pop rcx` round-trip through 1 MiB guest stack | Guest stack region + PUSH/POP lifters |
+
+The first test, in detail — `cargo test -p quantum-cli --test
+e2e_exit_process` hand-assembles a Win64 PE (DOS header, COFF,
 PE32+ optional header, two sections (`.text`, `.idata`), an
 `IMAGE_IMPORT_DESCRIPTOR` table, an Import Lookup Table, a
-`hint+name` blob and a DLL name — whose `.text` is exactly:
+`hint+name` blob and a DLL name) whose `.text` is exactly:
 
 ```
 mov ecx, 42                       ; B9 2A 00 00 00
@@ -38,8 +48,11 @@ and runs it through the entire stack:
 | 12 | `quantum-kernel32::ExitProcess` | Write 42 to `EXIT_CODE`; `longjmp` to the trap |
 | 13 | test | Reads `42` |
 
-79 tests passing across the workspace. `cargo clippy -- -D warnings`
+84 tests passing across the workspace. `cargo clippy -- -D warnings`
 clean. No third-party Rust crates in `[dependencies]`.
+
+See `NIGHTLY-RECAP.md` for the chronological build log of the
+overnight bring-up.
 
 ## Layout
 
