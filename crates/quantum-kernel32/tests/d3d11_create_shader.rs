@@ -387,6 +387,23 @@ fn device_context_state_setters_are_callable_no_ops() {
 }
 
 #[test]
+fn texture_dimensions_round_trip_via_cocoa_accessors() {
+    if !quantum_kernel32::cocoa::metal_available() {
+        return;
+    }
+    let tex = quantum_kernel32::cocoa::metal_new_texture_2d_with_usage(
+        320, 240, 80, // BGRA8Unorm
+        0x05,        // ShaderRead | RenderTarget
+    );
+    assert!(!tex.is_null());
+    let w = unsafe { quantum_kernel32::cocoa::metal_texture_width(tex) };
+    let h = unsafe { quantum_kernel32::cocoa::metal_texture_height(tex) };
+    assert_eq!(w, 320);
+    assert_eq!(h, 240);
+    quantum_kernel32::cocoa::release(tex);
+}
+
+#[test]
 fn create_buffer_rejects_zero_size() {
     if !quantum_kernel32::cocoa::metal_available() {
         return;

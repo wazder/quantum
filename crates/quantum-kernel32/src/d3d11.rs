@@ -638,18 +638,26 @@ extern "C" fn ctx_clear_render_target_view(
     ] };
     let to_byte = |f: f32| (f.clamp(0.0, 1.0) * 255.0).round() as u8;
     let bgra = [to_byte(rgba[2]), to_byte(rgba[1]), to_byte(rgba[0]), to_byte(rgba[3])];
-    // We don't have a way to ask MTLTexture for its width/height back
-    // through Obj-C from this side without another set of bindings, so
-    // for now we assume the texture matches a common back-buffer size.
-    // Real fix: stash w/h on the ResourceView at creation time. As a
-    // first pass we walk the texture as 1x1 (no-op visible effect but
-    // it exercises the ABI). Width/height pickup is wired in a
-    // follow-up.
-    // SAFETY: view.resource was set during CreateRenderTargetView from
-    // a real MTLTexture pointer we ourselves allocated; the format is
-    // BGRA-compatible.
+    // Query the texture's real dimensions so the clear actually fills
+    // the whole surface. Falls back to 1×1 if the property accessors
+    // return 0 (e.g. detached or freed).
+    //
+    // SAFETY: view.resource is a live MTLTexture we created via our
+    // allocator; metal_texture_{width,height} only call objc_msgSend
+    // with the matching selector.
+    let (w, h) = unsafe {
+        (
+            crate::cocoa::metal_texture_width(view.resource) as u32,
+            crate::cocoa::metal_texture_height(view.resource) as u32,
+        )
+    };
+    if w == 0 || h == 0 {
+        return;
+    }
+    // SAFETY: as above; format-compatibility is upheld by the resource
+    // tracker (RTVs are always wrapped around BGRA/RGBA family).
     unsafe {
-        crate::cocoa::metal_texture_fill_bgra(view.resource, 1, 1, bgra);
+        crate::cocoa::metal_texture_fill_bgra(view.resource, w, h, bgra);
     }
 }
 

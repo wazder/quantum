@@ -527,6 +527,35 @@ pub fn metal_present(cmd_buffer: *mut c_void, drawable: *mut c_void) {
     msg_send_void(cmd_buffer, sel("commit\0"));
 }
 
+/// Ask an `MTLTexture*` for its width / height via the property
+/// accessors. Returns 0 on null input. The result is `NSUInteger`
+/// (usize on Apple LP64).
+///
+/// # Safety
+/// `texture` must be null or a live `MTLTexture*` returned by one of
+/// our allocators.
+pub unsafe fn metal_texture_width(texture: *mut c_void) -> usize {
+    if texture.is_null() {
+        return 0;
+    }
+    type F = unsafe extern "C" fn(Object, Sel) -> usize;
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe { f(texture, sel("width\0")) }
+}
+
+/// See `metal_texture_width`.
+///
+/// # Safety
+/// As `metal_texture_width`.
+pub unsafe fn metal_texture_height(texture: *mut c_void) -> usize {
+    if texture.is_null() {
+        return 0;
+    }
+    type F = unsafe extern "C" fn(Object, Sel) -> usize;
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe { f(texture, sel("height\0")) }
+}
+
 /// Fill a 2D MTLTexture with a single BGRA8-packed clear color via
 /// `replaceRegion:mipmapLevel:withBytes:bytesPerRow:`. CPU-side fill —
 /// useful as a fallback for ClearRenderTargetView until a real
