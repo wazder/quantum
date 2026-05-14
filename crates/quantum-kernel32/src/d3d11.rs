@@ -456,15 +456,97 @@ pub extern "C" fn D3D11CreateDevice(
         }
     }
     if !pp_immediate_context.is_null() {
-        // Reuse the same shared object for the immediate context —
-        // its vtable has different methods but our stubs return
-        // E_NOTIMPL across the board, so a single static is fine until
-        // real implementations land.
         unsafe {
-            *pp_immediate_context = device_instance() as *const Device as *mut c_void;
+            *pp_immediate_context =
+                context_instance() as *const DeviceContext as *mut c_void;
         }
     }
     S_OK
+}
+
+// ---------- ID3D11DeviceContext ----------
+//
+// Layout: 144 vtable slots. We share the DeviceVtbl size constant
+// (128) so a misaligned guest can't walk off the end; the methods we
+// actually populate fit comfortably.
+
+const D3D11_CTX_VS_SET_CONSTANT_BUFFERS_SLOT: usize = 7;
+const D3D11_CTX_PS_SET_SHADER_RESOURCES_SLOT: usize = 8;
+const D3D11_CTX_PS_SET_SHADER_SLOT: usize = 9;
+const D3D11_CTX_PS_SET_SAMPLERS_SLOT: usize = 10;
+const D3D11_CTX_VS_SET_SHADER_SLOT: usize = 11;
+const D3D11_CTX_DRAW_INDEXED_SLOT: usize = 12;
+const D3D11_CTX_DRAW_SLOT: usize = 13;
+const D3D11_CTX_IA_SET_INPUT_LAYOUT_SLOT: usize = 17;
+const D3D11_CTX_IA_SET_VERTEX_BUFFERS_SLOT: usize = 18;
+const D3D11_CTX_IA_SET_INDEX_BUFFER_SLOT: usize = 19;
+const D3D11_CTX_IA_SET_PRIMITIVE_TOPOLOGY_SLOT: usize = 24;
+const D3D11_CTX_OM_SET_RENDER_TARGETS_SLOT: usize = 33;
+const D3D11_CTX_RS_SET_VIEWPORTS_SLOT: usize = 44;
+const D3D11_CTX_CLEAR_RENDER_TARGET_VIEW_SLOT: usize = 50;
+
+/// Accept-and-ignore void state setter. Win64 ABI: AAPCS64 trims any
+/// args we don't read.
+extern "C" fn ctx_noop_void() {}
+
+/// Some context methods are documented to return `HRESULT`; for those
+/// we hand back S_OK so the guest believes the state was accepted.
+extern "C" fn ctx_noop_hresult() -> i32 {
+    S_OK
+}
+
+#[repr(C, align(16))]
+struct DeviceContext {
+    vtbl: *const DeviceVtbl,
+    _pad: [u8; 248],
+}
+
+unsafe impl Sync for DeviceContext {}
+unsafe impl Send for DeviceContext {}
+
+fn context_vtbl() -> &'static DeviceVtbl {
+    use std::sync::OnceLock;
+    static VTBL: OnceLock<DeviceVtbl> = OnceLock::new();
+    VTBL.get_or_init(|| {
+        let mut slots = [d3d11_method_notimpl as *const () as usize; VTABLE_SLOTS];
+        slots[0] = d3d11_qi as *const () as usize;
+        slots[1] = d3d11_addref as *const () as usize;
+        slots[2] = d3d11_release as *const () as usize;
+        // State setters — all accept-and-ignore. Bind these to a void
+        // function; the Win64 → AAPCS64 calling convention will silently
+        // drop trailing args we don't read.
+        for slot in [
+            D3D11_CTX_VS_SET_CONSTANT_BUFFERS_SLOT,
+            D3D11_CTX_PS_SET_SHADER_RESOURCES_SLOT,
+            D3D11_CTX_PS_SET_SHADER_SLOT,
+            D3D11_CTX_PS_SET_SAMPLERS_SLOT,
+            D3D11_CTX_VS_SET_SHADER_SLOT,
+            D3D11_CTX_DRAW_INDEXED_SLOT,
+            D3D11_CTX_DRAW_SLOT,
+            D3D11_CTX_IA_SET_INPUT_LAYOUT_SLOT,
+            D3D11_CTX_IA_SET_VERTEX_BUFFERS_SLOT,
+            D3D11_CTX_IA_SET_INDEX_BUFFER_SLOT,
+            D3D11_CTX_IA_SET_PRIMITIVE_TOPOLOGY_SLOT,
+            D3D11_CTX_OM_SET_RENDER_TARGETS_SLOT,
+            D3D11_CTX_RS_SET_VIEWPORTS_SLOT,
+            D3D11_CTX_CLEAR_RENDER_TARGET_VIEW_SLOT,
+        ] {
+            slots[slot] = ctx_noop_void as *const () as usize;
+        }
+        // A small number of context methods do return HRESULT; we don't
+        // have those wired today, but leave the slot template for them.
+        let _ = ctx_noop_hresult; // keep the symbol live for the future.
+        DeviceVtbl { slots }
+    })
+}
+
+fn context_instance() -> &'static DeviceContext {
+    use std::sync::OnceLock;
+    static CTX: OnceLock<DeviceContext> = OnceLock::new();
+    CTX.get_or_init(|| DeviceContext {
+        vtbl: context_vtbl() as *const DeviceVtbl,
+        _pad: [0; 248],
+    })
 }
 
 /// Resolver for d3d11.dll. Returns the host function address of an

@@ -337,6 +337,56 @@ fn create_texture_2d_rejects_zero_dimensions() {
 }
 
 #[test]
+fn device_context_state_setters_are_callable_no_ops() {
+    // Walk the immediate-context vtable and call a few state setters
+    // through it. They should accept any arguments and return without
+    // crashing. This exercises the fact that the context has its own
+    // vtable separate from the device's.
+    let mut device: *mut c_void = core::ptr::null_mut();
+    let mut feature_level: u32 = 0;
+    let mut ctx: *mut c_void = core::ptr::null_mut();
+    let _ = quantum_kernel32::d3d11::D3D11CreateDevice(
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null(),
+        0,
+        0,
+        &mut device,
+        &mut feature_level,
+        &mut ctx,
+    );
+    assert!(!ctx.is_null(), "immediate-context pointer must be non-null");
+    assert_ne!(ctx, device, "context must be its own object, not aliased to device");
+
+    // IASetPrimitiveTopology(ctx, topology) at slot 24.
+    let slot_topo = 24usize;
+    type SetTopo = unsafe extern "C" fn(*mut c_void, u32);
+    let topo_fn: SetTopo = unsafe { core::mem::transmute(vtbl_slot(ctx, slot_topo)) };
+    unsafe {
+        topo_fn(ctx, 4); // D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+    }
+
+    // Draw(ctx, vertex_count, start_vertex_location) at slot 13.
+    let slot_draw = 13usize;
+    type Draw = unsafe extern "C" fn(*mut c_void, u32, u32);
+    let draw_fn: Draw = unsafe { core::mem::transmute(vtbl_slot(ctx, slot_draw)) };
+    unsafe {
+        draw_fn(ctx, 3, 0);
+    }
+
+    // OMSetRenderTargets(ctx, count, ppRTVs, pDSV) at slot 33.
+    let slot_om = 33usize;
+    type OmSet =
+        unsafe extern "C" fn(*mut c_void, u32, *const *mut c_void, *mut c_void);
+    let om_fn: OmSet = unsafe { core::mem::transmute(vtbl_slot(ctx, slot_om)) };
+    unsafe {
+        om_fn(ctx, 0, core::ptr::null(), core::ptr::null_mut());
+    }
+}
+
+#[test]
 fn create_buffer_rejects_zero_size() {
     if !quantum_kernel32::cocoa::metal_available() {
         return;
