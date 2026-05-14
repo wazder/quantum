@@ -95,6 +95,89 @@ struct DeviceVtbl {
 
 unsafe impl Sync for DeviceVtbl {}
 
+/// ID3D11Device::CreateVertexShader vtable slot — per `<d3d11.h>`.
+const D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT: usize = 12;
+/// ID3D11Device::CreatePixelShader vtable slot.
+const D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT: usize = 15;
+
+/// `HRESULT ID3D11Device::CreateVertexShader(LPCVOID pShaderBytecode,
+///                                            SIZE_T BytecodeLength,
+///                                            ID3D11ClassLinkage *pClassLinkage,
+///                                            ID3D11VertexShader **ppVertexShader)`
+///
+/// We validate the DXBC blob via `quantum_kernel32::dxbc::parse` and
+/// (optionally) transpile its SHEX chunk to MSL with `emit_msl`. The
+/// MSL string is dropped today — Metal pipeline creation lands in a
+/// follow-up. Returns S_OK if the blob is a well-formed DXBC container
+/// even when transpilation fails, so games can proceed past the shader
+/// load.
+///
+/// `ppVertexShader` may be NULL in our JIT pipeline because the lifter
+/// doesn't yet marshal the 5th Win64 arg; we tolerate that.
+extern "C" fn d3d11_create_vertex_shader(
+    _this: *mut c_void,
+    p_bytecode: *const c_void,
+    bytecode_len: usize,
+    _class_linkage: *mut c_void,
+    pp_vs: *mut *mut c_void,
+) -> i32 {
+    process_shader_blob(p_bytecode, bytecode_len, pp_vs)
+}
+
+/// `ID3D11Device::CreatePixelShader` — same layout as the VS variant.
+extern "C" fn d3d11_create_pixel_shader(
+    _this: *mut c_void,
+    p_bytecode: *const c_void,
+    bytecode_len: usize,
+    _class_linkage: *mut c_void,
+    pp_ps: *mut *mut c_void,
+) -> i32 {
+    process_shader_blob(p_bytecode, bytecode_len, pp_ps)
+}
+
+/// Shared bytecode handler: parse the DXBC container, attempt MSL
+/// transpilation of the instruction chunk for diagnostics, and write a
+/// fake shader pointer into `pp_out` if it's non-null.
+fn process_shader_blob(
+    p_bytecode: *const c_void,
+    bytecode_len: usize,
+    pp_out: *mut *mut c_void,
+) -> i32 {
+    if p_bytecode.is_null() || bytecode_len == 0 {
+        return E_NOTIMPL;
+    }
+    // SAFETY: caller is a Win32 guest contract obligated to provide a
+    // valid pointer + length. We make a slice and inspect it read-only.
+    let bytes: &[u8] = unsafe {
+        core::slice::from_raw_parts(p_bytecode as *const u8, bytecode_len)
+    };
+    let container = match crate::dxbc::parse(bytes) {
+        Ok(c) => c,
+        Err(_) => return E_NOTIMPL,
+    };
+    // Transpile is best-effort; failure doesn't fail the call.
+    if let Some(chunk) = container.instructions_chunk() {
+        let payload = chunk.payload(bytes);
+        if let Some(tokens) = crate::dxbc::InstructionIter::from_payload_bytes(payload)
+        {
+            let _msl = crate::dxbc::emit_msl(&tokens);
+            // TODO: hand the MSL string to a Metal pipeline factory
+            // and stash the resulting pipeline pointer in the
+            // returned shader object. For now we just drop it.
+        }
+    }
+    if !pp_out.is_null() {
+        // Reuse the device's static object so the guest has a
+        // non-null shader handle to stash; vtable methods on the
+        // shader object aren't exercised yet, so the static stub
+        // suffices.
+        unsafe {
+            *pp_out = device_instance() as *const Device as *mut c_void;
+        }
+    }
+    S_OK
+}
+
 /// Build the vtable at init time so the addresses of the stubs are
 /// stable. We expose it via a `&'static DeviceVtbl` so the device
 /// object's `lpVtbl` can point at it.
@@ -106,6 +189,10 @@ fn device_vtbl() -> &'static DeviceVtbl {
         slots[0] = d3d11_qi as *const () as usize;
         slots[1] = d3d11_addref as *const () as usize;
         slots[2] = d3d11_release as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT] =
+            d3d11_create_vertex_shader as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT] =
+            d3d11_create_pixel_shader as *const () as usize;
         DeviceVtbl { slots }
     })
 }
