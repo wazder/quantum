@@ -407,13 +407,24 @@ impl<'a> Lifter<'a> {
         self.emitter.mov64(Reg::X1, Reg::X2); // arg1 <- RDX
         self.emitter.mov64(Reg::X2, Reg::X8); // arg2 <- R8
         self.emitter.mov64(Reg::X3, Reg::x(9)); // arg3 <- R9
-        // Args 5+ in Win64 live on the guest stack at [rsp+32], [rsp+40], ...
-        // In AAPCS64 the 5th+ args go on the host stack too. We don't
-        // wire that path yet, but several common thunks (WriteFile's
-        // OVERLAPPED, etc.) accept NULL for those slots, so zero X4 as
-        // a safe default. Callees that need a real 5th arg will see 0;
-        // we add a real marshaling path in a follow-up.
-        self.emitter.movz64(Reg::X4, 0, 0);
+        // Args 5..8 in Win64 live on the guest stack starting at
+        // [rsp+0x20] — Win64 always reserves 0x20 of shadow space for
+        // the four register args. Our JIT bypasses the actual CALL
+        // (it doesn't push a return address on the guest stack), so
+        // X19 (guest RSP) still points at the caller's frame top and
+        // [X19+0x20..0x38] is exactly the four stack-arg slots.
+        //
+        // We unconditionally load X4..X7 — host functions read only what
+        // their signature declares, so excess loads are harmless as
+        // long as the memory is mapped. Callers that pass through this
+        // path must have allocated at least 0x40 bytes of guest stack
+        // (one GuestStack region is plenty); tests without a real RSP
+        // will fault, which is the correct signal that their setup is
+        // ABI-violating.
+        self.emitter.ldr64(Reg::X4, Reg::x(19), 0x20);
+        self.emitter.ldr64(Reg::X5, Reg::x(19), 0x28);
+        self.emitter.ldr64(Reg::X6, Reg::x(19), 0x30);
+        self.emitter.ldr64(Reg::X7, Reg::x(19), 0x38);
 
         // Save host frame & link register across the call so the lifted
         // block can still RET to its original host caller afterwards.
@@ -3133,6 +3144,45 @@ mod tests {
         let words = lift_one(&[0x48, 0x89, 0x4C, 0x24, 0x08]);
         // Should emit mov xtmp, x19 (rsp) then str x1 (rcx), [xtmp, #8].
         assert!(!words.is_empty(), "expected non-empty emission");
+    }
+
+    #[test]
+    fn call_indirect_loads_args_5_through_8_from_guest_stack() {
+        // `call qword ptr [rip + 0x100]` — FF 15 + disp32.
+        // After this lift the byte stream must include `ldr X4, [X19, #0x20]`
+        // through `ldr X7, [X19, #0x38]`, proving we marshal stack-resident
+        // Win64 args 5..8 into AAPCS64 X4..X7.
+        let words = lift_one(&[0xFF, 0x15, 0x00, 0x01, 0x00, 0x00]);
+        // LDR (immediate, unsigned offset, 64-bit): 0xF940_0000 base,
+        // bits 21..10 = imm12 (offset >> 3), bits 9..5 = Rn, bits 4..0 = Rd.
+        //   ldr X4, [X19, #0x20]  -> 0xF940_1264
+        //   ldr X5, [X19, #0x28]  -> 0xF940_1665
+        //   ldr X6, [X19, #0x30]  -> 0xF940_1A66
+        //   ldr X7, [X19, #0x38]  -> 0xF940_1E67
+        assert!(words.contains(&0xF940_1264_u32), "missing ldr X4, [X19, #0x20]");
+        assert!(words.contains(&0xF940_1665_u32), "missing ldr X5, [X19, #0x28]");
+        assert!(words.contains(&0xF940_1A66_u32), "missing ldr X6, [X19, #0x30]");
+        assert!(words.contains(&0xF940_1E67_u32), "missing ldr X7, [X19, #0x38]");
+        // And the old `movz X4, #0` (0xD280_0004) must be gone.
+        assert!(
+            !words.contains(&0xD280_0004_u32),
+            "stale movz X4, #0 still in emission"
+        );
+    }
+
+    #[test]
+    fn call_indirect_via_register_skips_load() {
+        // `call rax` — FF D0. The emission must NOT include an LDR
+        // through X16 (we set X16 directly via mov), but it should
+        // include `mov X16, X0` (RAX is pinned to X0).
+        let words = lift_one(&[0xFF, 0xD0]);
+        // ORR Xd, XZR, Xm encoding for `mov X16, X0`:
+        //   0xAA00_03F0 base + (Rm << 16) + (Rd << 0)
+        //   mov X16, X0 → 0xAA00_03F0
+        assert!(
+            words.contains(&0xAA00_03F0_u32),
+            "missing mov X16, X0 for `call rax`; got: {words:08X?}"
+        );
     }
 
     #[test]

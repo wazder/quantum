@@ -164,8 +164,10 @@ fn win64_prologue_with_shadow_space_round_trips() {
     let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
     // Initialise RSP per the Win64 entry contract (8-misaligned,
-    // STOP_SENTINEL as the fake return address).
-    ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
+    // STOP_SENTINEL as the fake return address). entry_rsp puts RSP
+    // at top-8 which doesn't leave the 0x20 shadow space + arg slots
+    // that lift_call_indirect now reads. Step further down.
+    ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL) - 0x40;
 
     let mut disp = Dispatcher::new(16384).expect("dispatcher");
     let entry_va = image.actual_base + image.entry_rva as u64;

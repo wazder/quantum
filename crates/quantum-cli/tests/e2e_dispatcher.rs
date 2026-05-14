@@ -21,7 +21,7 @@ use quantum_kernel32::process::run_with_exit_trap;
 use quantum_kernel32::resolve;
 use quantum_loader::{PeFile, apply_relocations, imports, load};
 use quantum_runtime::{
-    Dispatcher, GuestContext, MachVmManager, STOP_SENTINEL, invoke_block_with_ctx,
+    Dispatcher, GuestContext, GuestStack, MachVmManager, STOP_SENTINEL, invoke_block_with_ctx,
 };
 
 fn build_pe() -> Vec<u8> {
@@ -157,7 +157,13 @@ fn two_blocks_with_unconditional_jmp() {
 
     let mut disp = Dispatcher::new(16384).expect("dispatcher");
     let entry_va = image.actual_base + image.entry_rva as u64;
+    // Win64 caller reserves 0x20 shadow + stack-arg slots before any
+    // CALL. lift_call_indirect now loads X4..X7 from [X19+0x20..0x38]
+    // unconditionally, so RSP must point at least 0x40 bytes inside a
+    // real guest stack region.
+    let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
+    ctx.gprs[4] = stack.top() - 0x40;
 
     let exit_code = run_with_exit_trap(|| {
         run_via_dispatcher(&mut disp, &image, &mut ctx, entry_va);

@@ -183,7 +183,9 @@ fn fibonacci_loop_returns_correct_value() {
 
     let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
-    ctx.gprs[4] = stack.top();
+    // Reserve 0x40 below top so lift_call_indirect's X4..X7 loads from
+    // [X19+0x20..0x38] stay inside the mapped guest stack.
+    ctx.gprs[4] = stack.top() - 0x40;
 
     let mut disp = Dispatcher::new(16384).expect("dispatcher");
     let entry_va = image.actual_base + image.entry_rva as u64;

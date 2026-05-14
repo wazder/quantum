@@ -126,7 +126,11 @@ fn push_then_pop_round_trips_through_guest_stack() {
         .expect("entry bytes")
         .to_vec();
 
-    let block = block::translate_with_stack(&entry_bytes, entry_va, Some(stack.top()), |op| {
+    // Reserve 0x40 below stack.top() so lift_call_indirect's
+    // [X19+0x20..0x38] arg5..8 loads stay inside the mapped region
+    // when the lifted block calls ExitProcess.
+    let stack_top = stack.top() - 0x40;
+    let block = block::translate_with_stack(&entry_bytes, entry_va, Some(stack_top), |op| {
         matches!(op, Op::Ud2 | Op::Ret)
     })
     .expect("translate block");

@@ -149,7 +149,9 @@ fn guest_reads_teb_through_gs_segment() {
 
     let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
-    ctx.gprs[4] = stack.top();
+    // 0x40 reservation for Win64 shadow + stack args (lift_call_indirect
+    // loads X4..X7 from [RSP+0x20..0x38]).
+    ctx.gprs[4] = stack.top() - 0x40;
     ctx.gs_base = pcb.teb_addr;
 
     let mut disp = Dispatcher::new(16384).expect("dispatcher");

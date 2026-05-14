@@ -207,7 +207,10 @@ fn guest_calls_heap_alloc_and_exits_with_success() {
 
     let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
-    ctx.gprs[4] = stack.top();
+    // Win64 ABI: caller reserves 0x20 shadow + room for stack args
+    // before any CALL. JIT lift_call_indirect now reads X4..X7 from
+    // [RSP+0x20..0x38] unconditionally.
+    ctx.gprs[4] = stack.top() - 0x40;
 
     let mut disp = Dispatcher::new(16384).expect("dispatcher");
     let entry_va = image.actual_base + image.entry_rva as u64;

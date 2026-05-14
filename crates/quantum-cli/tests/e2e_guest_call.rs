@@ -151,11 +151,12 @@ fn guest_calls_own_function_then_exit() {
     let imp = imports::parse(&image).expect("imports");
     imports::wire_iat(&mut image, &imp, resolve).expect("wire IAT");
 
-    // CALL needs a real guest stack — the dispatcher will push the
-    // return RIP onto it.
+    // CALL needs a real guest stack — the dispatcher pushes the
+    // return RIP onto it AND lift_call_indirect loads stack-resident
+    // args 5..8 from [RSP+0x20..0x38]. Reserve 0x40 below top.
     let stack = GuestStack::default_size().expect("stack");
     let mut ctx = GuestContext::default();
-    ctx.gprs[4] = stack.top(); // RSP
+    ctx.gprs[4] = stack.top() - 0x40;
 
     let mut disp = Dispatcher::new(16384).expect("dispatcher");
     let entry_va = image.actual_base + image.entry_rva as u64;
