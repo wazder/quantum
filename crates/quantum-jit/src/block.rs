@@ -180,8 +180,14 @@ pub fn translate_for_dispatcher(
 
     // ---- Body ----
     let last = insts.len() - 1;
+    let legacy32 = matches!(mode, IsaMode::Legacy32);
     for inst in &insts[..last] {
-        if let Err(e) = Lifter::new(&mut emitter).lift(inst) {
+        let mut lif = if legacy32 {
+            Lifter::new_legacy32(&mut emitter)
+        } else {
+            Lifter::new(&mut emitter)
+        };
+        if let Err(e) = lif.lift(inst) {
             let inst_off = inst.guest_rip.wrapping_sub(start_rip) as usize;
             let raw = bytes
                 .get(inst_off..inst_off + inst.len as usize)

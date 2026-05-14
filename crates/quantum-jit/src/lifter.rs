@@ -48,11 +48,25 @@ pub type LifterResult<T> = core::result::Result<T, LifterError>;
 
 pub struct Lifter<'a> {
     pub emitter: &'a mut Emitter,
+    /// `true` if we're lifting a 32-bit (legacy) guest. Changes the
+    /// ABI used by indirect-call lifters: 32-bit guests pass args on
+    /// the stack (cdecl/stdcall) instead of in RCX/RDX/R8/R9.
+    pub legacy32: bool,
 }
 
 impl<'a> Lifter<'a> {
     pub fn new(emitter: &'a mut Emitter) -> Self {
-        Self { emitter }
+        Self {
+            emitter,
+            legacy32: false,
+        }
+    }
+
+    pub fn new_legacy32(emitter: &'a mut Emitter) -> Self {
+        Self {
+            emitter,
+            legacy32: true,
+        }
     }
 
     pub fn lift(&mut self, inst: &Inst) -> LifterResult<()> {
@@ -343,6 +357,26 @@ impl<'a> Lifter<'a> {
         let target = inst.operands[0].ok_or(LifterError::BadOperands)?;
         // Effective address of the function pointer slot -> X16.
         let leftover = self.addr_into_xtmp(&target, inst, Reg::X16)?;
+        if self.legacy32 {
+            // 32-bit indirect call. IAT slots are 4 bytes wide; thunks
+            // are __stdcall/cdecl with up to 4 args on the guest stack
+            // at [esp+4..+16].
+            self.emitter.ldr32(Reg::X16, Reg::X16, leftover);
+            // Marshal first four 32-bit stack args into AAPCS64 W0..W3.
+            // Reads beyond the actual arg count are harmless — the
+            // host function reads only what its signature declares and
+            // the guest stack always has these slots reserved (caller
+            // pushed at least the return slot above them).
+            self.emitter.ldr32(Reg::X0, Reg::x(19), 4);
+            self.emitter.ldr32(Reg::X1, Reg::x(19), 8);
+            self.emitter.ldr32(Reg::X2, Reg::x(19), 12);
+            self.emitter.ldr32(Reg::X3, Reg::x(19), 16);
+
+            self.emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
+            self.emitter.blr(Reg::X16);
+            self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
+            return Ok(());
+        }
         // X16 = *X16  (load the function pointer from the slot).
         self.emitter.ldr64(Reg::X16, Reg::X16, leftover);
         // Multi-argument Win64 -> AAPCS64 marshaling.
