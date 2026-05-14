@@ -753,10 +753,20 @@ pub fn emit_msl(tokens: &[u32]) -> Result<String, DecodeError> {
     ));
     out.push_str("#include <metal_stdlib>\nusing namespace metal;\n\n");
 
-    // Emit a stub `kernel` for the time being — picking the right
-    // function attribute (`[[vertex]]` / `[[fragment]]`) and signature
-    // requires walking ISGN / OSGN, which is a follow-up.
-    out.push_str("kernel void main_shader() {\n");
+    // Pick the function attribute + name from the shader stage. We
+    // can't yet emit real `[[stage_in]]` / `[[stage_out]]` structs
+    // because that needs ISGN/OSGN to be threaded into this call; for
+    // now the body operates on locals and writes to `o<n>` registers
+    // which a future emit_msl_with_signature(...) will hoist out.
+    let (attr, name) = match hdr.program_type {
+        ProgramType::Vertex => ("vertex", "main_vs"),
+        ProgramType::Pixel => ("fragment", "main_ps"),
+        ProgramType::Geometry => ("vertex", "main_gs"), // closest fit; real GS not supported
+        ProgramType::Hull | ProgramType::Domain => ("vertex", "main_ds"),
+        ProgramType::Compute => ("kernel", "main_cs"),
+        ProgramType::Unknown(_) => ("kernel", "main_shader"),
+    };
+    out.push_str(&format!("{attr} void {name}() {{\n"));
     out.push_str("    float4 r0 = float4(0);\n");
     out.push_str("    float4 r1 = float4(0);\n");
     out.push_str("    float4 r2 = float4(0);\n");
@@ -1206,7 +1216,8 @@ mod tests {
         let tokens = [version_token, total, ret, 0];
         let msl = emit_msl(&tokens).unwrap();
         assert!(msl.contains("metal_stdlib"));
-        assert!(msl.contains("kernel void main_shader"));
+        // PS 4.0 → fragment main_ps
+        assert!(msl.contains("fragment void main_ps"), "got:\n{msl}");
         assert!(msl.contains("return;"));
     }
 }
