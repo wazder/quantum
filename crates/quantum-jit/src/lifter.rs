@@ -355,30 +355,44 @@ impl<'a> Lifter<'a> {
     /// trampoline; see `docs/jit.md`.
     fn lift_call_indirect(&mut self, inst: &Inst) -> LifterResult<()> {
         let target = inst.operands[0].ok_or(LifterError::BadOperands)?;
-        // Effective address of the function pointer slot -> X16.
-        let leftover = self.addr_into_xtmp(&target, inst, Reg::X16)?;
-        if self.legacy32 {
-            // 32-bit indirect call. IAT slots are 4 bytes wide; thunks
-            // are __stdcall/cdecl with up to 4 args on the guest stack
-            // at [esp+4..+16].
-            self.emitter.ldr32(Reg::X16, Reg::X16, leftover);
-            // Marshal first four 32-bit stack args into AAPCS64 W0..W3.
-            // Reads beyond the actual arg count are harmless — the
-            // host function reads only what its signature declares and
-            // the guest stack always has these slots reserved (caller
-            // pushed at least the return slot above them).
-            self.emitter.ldr32(Reg::X0, Reg::x(19), 4);
-            self.emitter.ldr32(Reg::X1, Reg::x(19), 8);
-            self.emitter.ldr32(Reg::X2, Reg::x(19), 12);
-            self.emitter.ldr32(Reg::X3, Reg::x(19), 16);
+        // Two operand shapes:
+        //   * Operand::Reg(r) — `call rax` / `call rcx`. The register
+        //     itself holds the function pointer (C++ vtable dispatch
+        //     after a `mov rax, [vtbl+offset]`). No load needed.
+        //   * Operand::Mem(_) / Operand::RipRel — `call qword ptr [...]`.
+        //     The memory cell holds the function pointer (IAT entry,
+        //     vtable slot read in one instruction). Load through.
+        match target {
+            Operand::Reg(r, _) => {
+                self.emitter.mov64(Reg::X16, host_reg(r));
+            }
+            _ => {
+                // Effective address of the function pointer slot -> X16.
+                let leftover = self.addr_into_xtmp(&target, inst, Reg::X16)?;
+                if self.legacy32 {
+                    // 32-bit indirect call. IAT slots are 4 bytes wide; thunks
+                    // are __stdcall/cdecl with up to 4 args on the guest stack
+                    // at [esp+4..+16].
+                    self.emitter.ldr32(Reg::X16, Reg::X16, leftover);
+                    // Marshal first four 32-bit stack args into AAPCS64 W0..W3.
+                    // Reads beyond the actual arg count are harmless — the
+                    // host function reads only what its signature declares and
+                    // the guest stack always has these slots reserved (caller
+                    // pushed at least the return slot above them).
+                    self.emitter.ldr32(Reg::X0, Reg::x(19), 4);
+                    self.emitter.ldr32(Reg::X1, Reg::x(19), 8);
+                    self.emitter.ldr32(Reg::X2, Reg::x(19), 12);
+                    self.emitter.ldr32(Reg::X3, Reg::x(19), 16);
 
-            self.emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
-            self.emitter.blr(Reg::X16);
-            self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
-            return Ok(());
+                    self.emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
+                    self.emitter.blr(Reg::X16);
+                    self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
+                    return Ok(());
+                }
+                // X16 = *X16  (load the function pointer from the slot).
+                self.emitter.ldr64(Reg::X16, Reg::X16, leftover);
+            }
         }
-        // X16 = *X16  (load the function pointer from the slot).
-        self.emitter.ldr64(Reg::X16, Reg::X16, leftover);
         // Multi-argument Win64 -> AAPCS64 marshaling.
         //
         // Win64 places args 1..4 in RCX/RDX/R8/R9; AAPCS64 puts them in
