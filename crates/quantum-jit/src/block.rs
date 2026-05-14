@@ -138,25 +138,16 @@ pub fn translate_for_dispatcher(
 
     let mut emitter = Emitter::new();
 
-    // Peephole: Steam DRM anti-debug trap `int3; jmp -3`. On Windows a
-    // registered exception handler skips past both instructions; without
-    // it the int3 BRK aborts the host. Detect the pattern and treat the
-    // block as a no-op that resumes execution past the trap.
-    if let Some(skip_to) = detect_drm_int3_trap(&insts) {
-        emitter.stp64_pre(Reg::X29, Reg::X30, Reg::SP, -16);
-        emitter.stp64_pre(Reg::x(19), Reg::x(28), Reg::SP, -16);
-        emitter.stp64_pre(Reg::x(24), Reg::x(25), Reg::SP, -16);
-        emitter.mov64(Reg::x(28), Reg::X0);
-        emit_ctx_to_regs(&mut emitter);
-        emitter.ldr64(Reg::x(24), Reg::x(28), 144);
-        emitter.ldr64(Reg::x(25), Reg::x(28), 152);
-        emit_epilogue_const_rip(&mut emitter, skip_to);
-        emitter.finish()?;
-        return Ok(Block {
-            host_bytes: emitter.bytes(),
-            guest_len,
-        });
-    }
+    // (We used to peephole the Steam DRM `int3; jmp -3` trap into a no-op
+    // that skipped past both instructions. That was wrong when a DRM
+    // stub dynamically registers an UnhandledExceptionFilter via
+    // GetProcAddress + SetUnhandledExceptionFilter — Sekiro does this —
+    // because the filter never got a chance to set up the post-trap
+    // stack state. The detector helper stays for future opt-in use;
+    // by default we let BRK fire so the SEH dispatcher in quantum-cli
+    // routes through the registered filter, which is what Windows would
+    // do.
+    let _ = detect_drm_int3_trap(&insts);
 
     // ---- Dispatcher prologue ----
     // Save host callee-saved regs we touch:

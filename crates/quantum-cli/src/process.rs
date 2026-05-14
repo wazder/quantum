@@ -342,6 +342,81 @@ fn init_side_module(disp: &Dispatcher, sm: &SideModule, ctx: &mut GuestContext, 
     ctx.gprs[4] = saved_rsp;
 }
 
+/// Allocate one guest-VM page and write a single `RET` instruction
+/// (`0xC3`) at its base. Returns the guest address of that RET. The
+/// page persists for the lifetime of the process — we deliberately
+/// leak it so the SEH dispatcher can hand it out arbitrarily.
+fn drm_noop_ret_address(mem: &MachVmManager) -> u64 {
+    use quantum_runtime::{MemoryManager, Protection};
+    // Allocate RW, write the AArch64 `RET` instruction (0xD65F03C0)
+    // little-endian, then flip the page to RX. lift_call_indirect's
+    // BLR jumps directly to this host address — it must execute as
+    // native AArch64.
+    let region = mem
+        .allocate(None, 0x1000, Protection::RW)
+        .expect("drm noop page alloc");
+    let base = region.base();
+    let ret_word: u32 = 0xD65F_03C0; // RET (X30)
+    // SAFETY: 4 bytes in the 4096-byte region we own.
+    unsafe {
+        core::ptr::write_unaligned(base as *mut u32, ret_word.to_le());
+    }
+    mem.protect(base, 0x1000, Protection::RX)
+        .expect("drm noop page rx");
+    let addr = base as u64;
+    // Leak so the page survives for the rest of the process.
+    core::mem::forget(region);
+    addr
+}
+
+/// Try to recover from a SIGTRAP that landed on the standard Steam DRM
+/// `int3; jmp -3` trap (opcodes `cc eb fd`). Real Windows + Steam would
+/// fire the registered exception filter, which would write a decryption
+/// stage pointer to `[rsp+0x640]` and advance RIP past the pair. We
+/// don't have the decryption stages, but we can at least keep the host
+/// alive by writing the address of our `0xC3` no-op-ret page into the
+/// slot, then advancing past the trap pair. The post-trap
+/// `call [rsp+0x640]` then becomes a no-op call that returns
+/// immediately. Returns true if the recovery was applied.
+fn try_drm_int3_recover(
+    image: &LoadedImage,
+    ctx: &mut GuestContext,
+    crash_sig: i32,
+    drm_noop: u64,
+    trace: bool,
+) -> bool {
+    if crash_sig != 5 {
+        return false;
+    }
+    let rip = LAST_ENTERED_RIP.load(Ordering::SeqCst);
+    let rva = match rip.checked_sub(image.actual_base) {
+        Some(v) if (v as usize) < image.len() => v as u32,
+        _ => return false,
+    };
+    let bytes = match image.rva_to_slice(rva, 3) {
+        Some(b) => b,
+        None => return false,
+    };
+    if bytes != [0xCC, 0xEB, 0xFD] {
+        return false;
+    }
+    let rsp = ctx.gprs[4];
+    // SAFETY: rsp points into the guest stack, which is real host
+    // memory we allocated via MachVmManager. The +0x640 slot is part
+    // of the deep stack frame the DRM stub built before the trap.
+    unsafe {
+        *((rsp + 0x640) as *mut u64) = drm_noop;
+    }
+    ctx.rip = rip + 3; // advance past int3+jmp pair
+    if trace {
+        eprintln!(
+            "[trace] DRM recover: int3+jmp at {rip:#x}; [rsp+0x640]<-{drm_noop:#x}, resume @ {:#x}",
+            ctx.rip,
+        );
+    }
+    true
+}
+
 /// `ThreadSpawner` implementation that drives the same dispatcher /
 /// image as the main thread. Cloned `Arc`s keep both alive for as long
 /// as any worker thread is still running guest code.
@@ -527,6 +602,16 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
     let mut ctx = GuestContext::default();
     ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
 
+    // Allocate a single guest-VM page that contains a `ret` (0xC3) at
+    // offset 0. Steam DRM stubs `int3; jmp -3` patterns hand off to a
+    // handler that's supposed to write a decryption-stage pointer to
+    // [rsp+0x640]; without Steam attached we can't reproduce the
+    // decryption, but pointing the slot at a guest RET lets the
+    // subsequent `call [rsp+0x640]` succeed-no-op so the surrounding
+    // DRM bookkeeping doesn't take down the host. Best-effort: this is
+    // a stopgap, not a real DRM bypass.
+    let drm_noop_page = drm_noop_ret_address(&mem);
+
     let disp = Arc::new(Dispatcher::new(1024 * 1024).map_err(RunError::Dispatcher)?);
     // Image won't be mutated past this point — wrap in Arc so worker
     // threads spawned via CreateThread can read it concurrently.
@@ -589,7 +674,13 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
         };
         last_crash = Some(crash);
         if !dispatch_seh(&disp, &image, &mut ctx, &crash, &runtime_functions, trace) {
-            break;
+            // Nothing dispatched. Final-resort: Steam-DRM int3+jmp-3
+            // auto-recovery — pretend a Steam-style filter ran. Lets
+            // execution continue into the next DRM stage even though
+            // we can't actually decrypt it.
+            if !try_drm_int3_recover(&image, &mut ctx, crash.sig, drm_noop_page, trace) {
+                break;
+            }
         }
         // A handler returned EXCEPTION_CONTINUE_EXECUTION. Resume the
         // dispatcher loop from the (possibly-mutated) ctx.rip.
