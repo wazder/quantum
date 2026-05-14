@@ -99,10 +99,121 @@ unsafe impl Sync for DeviceVtbl {}
 const D3D11_DEVICE_CREATE_BUFFER_SLOT: usize = 3;
 /// ID3D11Device::CreateTexture2D vtable slot.
 const D3D11_DEVICE_CREATE_TEXTURE_2D_SLOT: usize = 5;
+/// ID3D11Device::CreateShaderResourceView vtable slot.
+const D3D11_DEVICE_CREATE_SRV_SLOT: usize = 7;
+/// ID3D11Device::CreateRenderTargetView vtable slot.
+const D3D11_DEVICE_CREATE_RTV_SLOT: usize = 9;
+/// ID3D11Device::CreateInputLayout vtable slot.
+const D3D11_DEVICE_CREATE_INPUT_LAYOUT_SLOT: usize = 11;
 /// ID3D11Device::CreateVertexShader vtable slot.
 const D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT: usize = 12;
 /// ID3D11Device::CreatePixelShader vtable slot.
 const D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT: usize = 15;
+
+/// ID3D11RenderTargetView / ShaderResourceView vtable — just IUnknown.
+/// The resource these views wrap is stored after the vtable pointer.
+#[repr(C, align(16))]
+struct ResourceView {
+    vtbl: *const DeviceVtbl,
+    resource: *mut c_void,
+    _pad: [u8; 240],
+}
+
+unsafe impl Sync for ResourceView {}
+unsafe impl Send for ResourceView {}
+
+fn view_vtbl() -> &'static DeviceVtbl {
+    use std::sync::OnceLock;
+    static VTBL: OnceLock<DeviceVtbl> = OnceLock::new();
+    VTBL.get_or_init(|| {
+        let mut slots = [d3d11_method_notimpl as *const () as usize; VTABLE_SLOTS];
+        slots[0] = d3d11_qi as *const () as usize;
+        slots[1] = d3d11_addref as *const () as usize;
+        slots[2] = d3d11_release as *const () as usize;
+        DeviceVtbl { slots }
+    })
+}
+
+fn make_view(resource: *mut c_void) -> *mut c_void {
+    let v = Box::new(ResourceView {
+        vtbl: view_vtbl() as *const DeviceVtbl,
+        resource,
+        _pad: [0; 240],
+    });
+    Box::into_raw(v) as *mut c_void
+}
+
+extern "C" fn d3d11_create_rtv(
+    _this: *mut c_void,
+    p_resource: *mut c_void,
+    _p_desc: *const c_void,
+    pp_rtv: *mut *mut c_void,
+) -> i32 {
+    if p_resource.is_null() {
+        return E_NOTIMPL;
+    }
+    let view = make_view(p_resource);
+    if !pp_rtv.is_null() {
+        unsafe {
+            *pp_rtv = view;
+        }
+    } else {
+        // Free immediately rather than leak.
+        unsafe {
+            let _ = Box::from_raw(view as *mut ResourceView);
+        }
+        return E_NOTIMPL;
+    }
+    S_OK
+}
+
+extern "C" fn d3d11_create_srv(
+    _this: *mut c_void,
+    p_resource: *mut c_void,
+    _p_desc: *const c_void,
+    pp_srv: *mut *mut c_void,
+) -> i32 {
+    if p_resource.is_null() {
+        return E_NOTIMPL;
+    }
+    let view = make_view(p_resource);
+    if !pp_srv.is_null() {
+        unsafe {
+            *pp_srv = view;
+        }
+    } else {
+        unsafe {
+            let _ = Box::from_raw(view as *mut ResourceView);
+        }
+        return E_NOTIMPL;
+    }
+    S_OK
+}
+
+/// `HRESULT ID3D11Device::CreateInputLayout(...)` — needs an opaque
+/// handle the guest can hand back to `IASetInputLayout` later. We
+/// allocate a tiny owned object; vtable just has IUnknown.
+extern "C" fn d3d11_create_input_layout(
+    _this: *mut c_void,
+    _p_elements: *const c_void,
+    _num_elements: u32,
+    _p_shader_bytecode: *const c_void,
+    _bytecode_len: usize,
+    pp_input_layout: *mut *mut c_void,
+) -> i32 {
+    let view = make_view(core::ptr::null_mut());
+    if !pp_input_layout.is_null() {
+        unsafe {
+            *pp_input_layout = view;
+        }
+    } else {
+        unsafe {
+            let _ = Box::from_raw(view as *mut ResourceView);
+        }
+        return E_NOTIMPL;
+    }
+    S_OK
+}
 
 /// D3D11_TEXTURE2D_DESC layout — 44 bytes. Several fields here are
 /// 32-bit unsigned; we only consume the ones we map.
@@ -377,6 +488,10 @@ fn device_vtbl() -> &'static DeviceVtbl {
             d3d11_create_buffer as *const () as usize;
         slots[D3D11_DEVICE_CREATE_TEXTURE_2D_SLOT] =
             d3d11_create_texture_2d as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_SRV_SLOT] = d3d11_create_srv as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_RTV_SLOT] = d3d11_create_rtv as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_INPUT_LAYOUT_SLOT] =
+            d3d11_create_input_layout as *const () as usize;
         slots[D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT] =
             d3d11_create_vertex_shader as *const () as usize;
         slots[D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT] =
@@ -683,19 +798,18 @@ struct DxgiSwapChainDesc {
 }
 
 /// SwapChain object handed back to the guest. First qword is the
-/// vtable; the rest holds the CAMetalLayer + MTLCommandQueue we need
-/// for Present. Sized to 256 bytes to leave room for back-buffer
-/// metadata (texture pointer, format, dimensions) the eventual
-/// real implementation will need.
+/// vtable; the rest holds the CAMetalLayer + MTLCommandQueue + cached
+/// back-buffer texture we need for Present + GetBuffer.
 #[repr(C, align(16))]
 struct SwapChain {
     vtbl: *const DeviceVtbl,
     layer: *mut c_void,
     cmd_queue: *mut c_void,
+    back_buffer: *mut c_void,
     width: u32,
     height: u32,
     format: u32,
-    _pad: [u8; 216],
+    _pad: [u8; 208],
 }
 
 unsafe impl Sync for SwapChain {}
@@ -703,8 +817,11 @@ unsafe impl Send for SwapChain {}
 
 /// IDXGISwapChain::Present vtable slot — per `<dxgi.h>`.
 const DXGI_SWAP_CHAIN_PRESENT_SLOT: usize = 8;
+/// IDXGISwapChain::GetBuffer vtable slot.
+const DXGI_SWAP_CHAIN_GET_BUFFER_SLOT: usize = 9;
 
-/// IDXGISwapChain vtable. Slots 0..2 are IUnknown; slot 8 is Present.
+/// IDXGISwapChain vtable. Slots 0..2 are IUnknown; slot 8 is Present;
+/// slot 9 is GetBuffer.
 fn dxgi_swap_chain_vtbl() -> &'static DeviceVtbl {
     use std::sync::OnceLock;
     static VTBL: OnceLock<DeviceVtbl> = OnceLock::new();
@@ -714,8 +831,44 @@ fn dxgi_swap_chain_vtbl() -> &'static DeviceVtbl {
         slots[1] = d3d11_addref as *const () as usize;
         slots[2] = d3d11_release as *const () as usize;
         slots[DXGI_SWAP_CHAIN_PRESENT_SLOT] = dxgi_swap_chain_present as *const () as usize;
+        slots[DXGI_SWAP_CHAIN_GET_BUFFER_SLOT] =
+            dxgi_swap_chain_get_buffer as *const () as usize;
         DeviceVtbl { slots }
     })
+}
+
+/// `HRESULT IDXGISwapChain::GetBuffer(UINT Buffer, REFIID, void **ppSurface)`.
+/// Returns the swap chain's back buffer as an `ID3D11Texture2D`. We
+/// allocate a real MTLTexture at the swap chain's width/height/format
+/// the first time GetBuffer is called and cache it on the SwapChain
+/// object; subsequent calls hand back the same pointer (matching the
+/// guest's lifetime expectations).
+extern "C" fn dxgi_swap_chain_get_buffer(
+    this: *mut c_void,
+    _buffer: u32,
+    _riid: *const c_void,
+    pp_surface: *mut *mut c_void,
+) -> i32 {
+    if this.is_null() || pp_surface.is_null() {
+        return E_NOTIMPL;
+    }
+    // SAFETY: `this` is our SwapChain. We need a mutable view to set
+    // the cached back buffer on first call.
+    let sc = unsafe { &mut *(this as *mut SwapChain) };
+    if sc.back_buffer.is_null() {
+        let usage = bind_flags_to_metal_usage(0x20); // RENDER_TARGET
+        let format = dxgi_to_metal_format(sc.format);
+        let tex =
+            crate::cocoa::metal_new_texture_2d_with_usage(sc.width, sc.height, format, usage);
+        if tex.is_null() {
+            return E_NOTIMPL;
+        }
+        sc.back_buffer = tex;
+    }
+    unsafe {
+        *pp_surface = sc.back_buffer;
+    }
+    S_OK
 }
 
 /// `HRESULT IDXGISwapChain::Present(UINT SyncInterval, UINT Flags)`.
@@ -773,10 +926,11 @@ extern "C" fn dxgi_create_swap_chain(
         vtbl: dxgi_swap_chain_vtbl() as *const DeviceVtbl,
         layer,
         cmd_queue,
+        back_buffer: core::ptr::null_mut(),
         width: desc.buffer_desc.width,
         height: desc.buffer_desc.height,
         format: desc.buffer_desc.format,
-        _pad: [0; 216],
+        _pad: [0; 208],
     });
     let raw = Box::into_raw(sc) as *mut c_void;
     if !pp_swap_chain.is_null() {
