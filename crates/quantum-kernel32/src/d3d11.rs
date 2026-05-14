@@ -634,8 +634,13 @@ pub fn resolve_d3dcompiler(function: &str) -> Option<u64> {
 // imports just CreateDXGIFactory; engine wraps the returned interface
 // to enumerate adapters and create a swap chain over a window.
 
+/// IDXGIFactory::CreateSwapChain vtable slot — per `<dxgi.h>`.
+const DXGI_FACTORY_CREATE_SWAP_CHAIN_SLOT: usize = 10;
+
 /// Static IDXGIFactory vtable — same layout philosophy as the
-/// ID3D11Device one above. Slots 0..2 are IUnknown.
+/// ID3D11Device one above. Slots 0..2 are IUnknown. We populate
+/// CreateSwapChain so games can ask for a swap chain over their
+/// HWND and get a real CAMetalLayer-backed object.
 fn dxgi_factory_vtbl() -> &'static DeviceVtbl {
     use std::sync::OnceLock;
     static VTBL: OnceLock<DeviceVtbl> = OnceLock::new();
@@ -644,8 +649,147 @@ fn dxgi_factory_vtbl() -> &'static DeviceVtbl {
         slots[0] = d3d11_qi as *const () as usize;
         slots[1] = d3d11_addref as *const () as usize;
         slots[2] = d3d11_release as *const () as usize;
+        slots[DXGI_FACTORY_CREATE_SWAP_CHAIN_SLOT] =
+            dxgi_create_swap_chain as *const () as usize;
         DeviceVtbl { slots }
     })
+}
+
+/// DXGI_MODE_DESC layout — 28 bytes.
+#[repr(C)]
+struct DxgiModeDesc {
+    width: u32,
+    height: u32,
+    refresh_numerator: u32,
+    refresh_denominator: u32,
+    format: u32,
+    scanline_ordering: u32,
+    scaling: u32,
+}
+
+/// DXGI_SWAP_CHAIN_DESC layout — 64 bytes on x64. We only consume the
+/// fields we currently care about (BufferDesc + OutputWindow).
+#[repr(C)]
+struct DxgiSwapChainDesc {
+    buffer_desc: DxgiModeDesc,
+    sample_count: u32,
+    sample_quality: u32,
+    buffer_usage: u32,
+    buffer_count: u32,
+    output_window: usize,
+    windowed: i32,
+    swap_effect: u32,
+    flags: u32,
+}
+
+/// SwapChain object handed back to the guest. First qword is the
+/// vtable; the rest holds the CAMetalLayer + MTLCommandQueue we need
+/// for Present. Sized to 256 bytes to leave room for back-buffer
+/// metadata (texture pointer, format, dimensions) the eventual
+/// real implementation will need.
+#[repr(C, align(16))]
+struct SwapChain {
+    vtbl: *const DeviceVtbl,
+    layer: *mut c_void,
+    cmd_queue: *mut c_void,
+    width: u32,
+    height: u32,
+    format: u32,
+    _pad: [u8; 216],
+}
+
+unsafe impl Sync for SwapChain {}
+unsafe impl Send for SwapChain {}
+
+/// IDXGISwapChain::Present vtable slot — per `<dxgi.h>`.
+const DXGI_SWAP_CHAIN_PRESENT_SLOT: usize = 8;
+
+/// IDXGISwapChain vtable. Slots 0..2 are IUnknown; slot 8 is Present.
+fn dxgi_swap_chain_vtbl() -> &'static DeviceVtbl {
+    use std::sync::OnceLock;
+    static VTBL: OnceLock<DeviceVtbl> = OnceLock::new();
+    VTBL.get_or_init(|| {
+        let mut slots = [d3d11_method_notimpl as *const () as usize; VTABLE_SLOTS];
+        slots[0] = d3d11_qi as *const () as usize;
+        slots[1] = d3d11_addref as *const () as usize;
+        slots[2] = d3d11_release as *const () as usize;
+        slots[DXGI_SWAP_CHAIN_PRESENT_SLOT] = dxgi_swap_chain_present as *const () as usize;
+        DeviceVtbl { slots }
+    })
+}
+
+/// `HRESULT IDXGISwapChain::Present(UINT SyncInterval, UINT Flags)`.
+/// Grabs the next CAMetalDrawable, queues a present command on the
+/// MTLCommandQueue stashed in the SwapChain struct, commits.
+extern "C" fn dxgi_swap_chain_present(this: *mut c_void, _sync: u32, _flags: u32) -> i32 {
+    if this.is_null() {
+        return E_NOTIMPL;
+    }
+    // SAFETY: `this` is a `SwapChain` we ourselves allocated and
+    // handed to the guest; it kept the pointer opaque so we can
+    // reborrow it here.
+    let sc = unsafe { &*(this as *const SwapChain) };
+    let drawable = crate::cocoa::next_drawable(sc.layer);
+    let cmd_buf = crate::cocoa::metal_command_buffer(sc.cmd_queue);
+    crate::cocoa::metal_present(cmd_buf, drawable);
+    S_OK
+}
+
+/// `HRESULT IDXGIFactory::CreateSwapChain(IUnknown*, DXGI_SWAP_CHAIN_DESC*,
+///                                         IDXGISwapChain**)`.
+extern "C" fn dxgi_create_swap_chain(
+    _this: *mut c_void,
+    _p_device: *mut c_void,
+    p_desc: *const c_void,
+    pp_swap_chain: *mut *mut c_void,
+) -> i32 {
+    if p_desc.is_null() {
+        return E_NOTIMPL;
+    }
+    // SAFETY: caller's DX11 guest contract guarantees a populated
+    // DXGI_SWAP_CHAIN_DESC.
+    let desc = unsafe { &*(p_desc as *const DxgiSwapChainDesc) };
+
+    // Find the NSWindow backing the HWND, if any. When QUANTUM_REAL_COCOA
+    // was off the guest's window was a registry-only token and we'll get
+    // 0 back; the swap chain still works in headless mode (Present is a
+    // no-op when layer is null).
+    let ns_window = crate::windows_state::ns_window_of(desc.output_window);
+    let layer = if ns_window != 0 {
+        let l = crate::cocoa::create_metal_layer();
+        if !l.is_null() {
+            crate::cocoa::attach_metal_layer(ns_window as *mut c_void, l);
+        }
+        l
+    } else {
+        core::ptr::null_mut()
+    };
+    let cmd_queue = crate::cocoa::metal_new_command_queue();
+
+    // Allocate the SwapChain on the heap so its address stays stable
+    // for the life of the program. Leaking is fine — swap chains are
+    // long-lived game-process singletons.
+    let sc = Box::new(SwapChain {
+        vtbl: dxgi_swap_chain_vtbl() as *const DeviceVtbl,
+        layer,
+        cmd_queue,
+        width: desc.buffer_desc.width,
+        height: desc.buffer_desc.height,
+        format: desc.buffer_desc.format,
+        _pad: [0; 216],
+    });
+    let raw = Box::into_raw(sc) as *mut c_void;
+    if !pp_swap_chain.is_null() {
+        unsafe {
+            *pp_swap_chain = raw;
+        }
+    } else {
+        // If the guest asked us to allocate but threw away the
+        // pointer we're going to leak the SwapChain + layer + queue.
+        // Returning the failure code makes that visible.
+        return E_NOTIMPL;
+    }
+    S_OK
 }
 
 fn dxgi_factory_instance() -> &'static Device {

@@ -225,6 +225,12 @@ pub fn window_title(hwnd: usize) -> Option<String> {
     g.windows.get(&hwnd).map(|w| w.title.clone())
 }
 
+/// Look up the `NSWindow*` we stashed for an HWND (or 0 if none).
+pub fn ns_window_of(hwnd: usize) -> usize {
+    let g = state().lock().unwrap();
+    g.windows.get(&hwnd).map(|w| w.ns_window).unwrap_or(0)
+}
+
 /// Diagnostic: the class atom an HWND was created with.
 pub fn window_class_atom(hwnd: usize) -> Option<u16> {
     let g = state().lock().unwrap();

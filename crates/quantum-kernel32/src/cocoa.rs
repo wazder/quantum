@@ -498,6 +498,35 @@ pub fn release(obj: *mut c_void) {
     msg_send_void(obj, sel("release\0"));
 }
 
+/// `[device newCommandQueue]` — returns a retained MTLCommandQueue.
+/// Null when Metal is unreachable.
+pub fn metal_new_command_queue() -> *mut c_void {
+    let device = metal_default_device();
+    if device.is_null() {
+        return core::ptr::null_mut();
+    }
+    msg_send_obj(device, sel("newCommandQueue\0"))
+}
+
+/// `[queue commandBuffer]` — autoreleased MTLCommandBuffer.
+pub fn metal_command_buffer(queue: *mut c_void) -> *mut c_void {
+    if queue.is_null() {
+        return core::ptr::null_mut();
+    }
+    msg_send_obj(queue, sel("commandBuffer\0"))
+}
+
+/// `[cmdBuffer presentDrawable:drawable]` followed by `[cmdBuffer commit]`.
+/// Submits the present and returns; callers continue execution.
+pub fn metal_present(cmd_buffer: *mut c_void, drawable: *mut c_void) {
+    if cmd_buffer.is_null() || drawable.is_null() {
+        return;
+    }
+    let sel_present = sel("presentDrawable:\0");
+    msg_send_void1(cmd_buffer, sel_present, drawable);
+    msg_send_void(cmd_buffer, sel("commit\0"));
+}
+
 /// Allocate an `MTLTexture` with a 2D-shaped descriptor. `pixel_format`
 /// is an `MTLPixelFormat` enum value (see d3d11 mapping below), `width`
 /// and `height` are pixels. Returns a retained `id<MTLTexture>` or
