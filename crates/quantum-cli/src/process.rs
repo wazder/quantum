@@ -356,10 +356,15 @@ fn drm_noop_ret_address(mem: &MachVmManager) -> u64 {
         .allocate(None, 0x1000, Protection::RW)
         .expect("drm noop page alloc");
     let base = region.base();
-    let ret_word: u32 = 0xD65F_03C0; // RET (X30)
-    // SAFETY: 4 bytes in the 4096-byte region we own.
+    // AArch64 sequence: `MOVZ X0, #1; RET`. We set X0 (== guest RAX
+    // in our pinning) to a non-zero sentinel so the post-trap DRM
+    // code's "if return value is null" checks don't immediately trip.
+    let movz_x0_1: u32 = 0xD280_0020; // MOVZ X0, #1
+    let ret_word: u32 = 0xD65F_03C0; // RET
+    // SAFETY: 8 bytes in the 4096-byte region we own.
     unsafe {
-        core::ptr::write_unaligned(base as *mut u32, ret_word.to_le());
+        core::ptr::write_unaligned(base as *mut u32, movz_x0_1.to_le());
+        core::ptr::write_unaligned((base as *mut u32).add(1), ret_word.to_le());
     }
     mem.protect(base, 0x1000, Protection::RX)
         .expect("drm noop page rx");
