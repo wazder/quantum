@@ -227,11 +227,21 @@ pub extern "C" fn PostMessageW(hwnd: usize, msg: u32, wparam: usize, lparam: usi
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn SendMessageW(_hwnd: usize, _msg: u32, _w: usize, _l: usize) -> usize {
-    // True SendMessage runs the WNDPROC inline. We can't call back into
-    // guest code from a host thunk yet (needs the dispatcher hop). Drop
-    // the message on the floor for now and return 0 like DefWindowProc.
-    0
+pub extern "C" fn SendMessageW(hwnd: usize, msg: u32, wparam: usize, lparam: usize) -> usize {
+    // True SendMessage runs the WNDPROC inline and returns the LRESULT.
+    // We route through the runtime's callback registry so the JIT
+    // re-enters guest code for the WNDPROC, then propagate RAX back
+    // as the call result. No registered invoker (e.g. unit tests) →
+    // fall back to the historical "drop and return 0" behaviour.
+    let wnd_proc = windows_state::wnd_proc_of(hwnd);
+    if wnd_proc == 0 {
+        return 0;
+    }
+    quantum_runtime::callback_registry::invoke(
+        wnd_proc as u64,
+        [hwnd as u64, msg as u64, wparam as u64, lparam as u64],
+    )
+    .unwrap_or(0) as usize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn GetMessageExtraInfo() -> usize {
@@ -543,14 +553,24 @@ pub extern "C" fn DispatchMessageW(msg: *const Msg) -> usize {
     if msg.is_null() {
         return 0;
     }
-    // DispatchMessage would call the window's WNDPROC. That's guest
-    // code; calling back into the JIT from a host thunk requires the
-    // dispatcher to expose a generic "invoke at RIP with args" entry,
-    // which we'll wire up alongside Phase-3.5 callbacks. For now,
-    // record the dispatch for diagnostics and return 0.
     let m = unsafe { &*msg };
-    let _wnd_proc = windows_state::wnd_proc_of(m.hwnd);
-    0
+    let wnd_proc = windows_state::wnd_proc_of(m.hwnd);
+    if wnd_proc == 0 {
+        return 0;
+    }
+    // Route the MSG through the WNDPROC by reusing the callback
+    // registry's invoker. Returns LRESULT; we propagate as the
+    // DispatchMessage return value (usize-sized for Win64).
+    quantum_runtime::callback_registry::invoke(
+        wnd_proc as u64,
+        [
+            m.hwnd as u64,
+            m.message as u64,
+            m.wparam as u64,
+            m.lparam as u64,
+        ],
+    )
+    .unwrap_or(0) as usize
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn PostQuitMessage(code: i32) {

@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod callback_registry;
 pub mod codecache;
 pub mod dispatcher;
 pub mod fd;
@@ -22,6 +23,7 @@ pub mod sys;
 pub mod thread;
 pub mod thread_registry;
 
+pub use callback_registry::CallbackInvoker;
 pub use codecache::CodeCache;
 pub use dispatcher::{
     Dispatcher, GuestContext, STOP_SENTINEL, invoke_block, invoke_block_with_ctx,

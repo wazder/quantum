@@ -428,6 +428,35 @@ struct CliThreadSpawner {
     image: Arc<LoadedImage>,
 }
 
+/// CallbackInvoker implementation: runs a fresh dispatcher loop at the
+/// requested guest RIP with a private context + stack, then returns
+/// whatever the guest left in RAX. Used by user32 DispatchMessageW /
+/// SendMessageW so window procedures actually execute.
+struct CliCallbackInvoker {
+    dispatcher: Arc<Dispatcher>,
+    image: Arc<LoadedImage>,
+}
+
+impl quantum_runtime::callback_registry::CallbackInvoker for CliCallbackInvoker {
+    fn invoke(&self, rip: u64, args: [u64; 4]) -> u64 {
+        // Each callback runs against a private guest stack so we don't
+        // disturb the caller's frame. A 64 KiB region is generous for
+        // a Win32 WNDPROC.
+        let stack = match GuestStack::default_size() {
+            Ok(s) => s,
+            Err(_) => return 0,
+        };
+        let mut ctx = GuestContext::default();
+        ctx.gprs[1] = args[0]; // RCX
+        ctx.gprs[2] = args[1]; // RDX
+        ctx.gprs[8] = args[2]; // R8
+        ctx.gprs[9] = args[3]; // R9
+        ctx.gprs[4] = stack.entry_rsp(STOP_SENTINEL);
+
+        invoke_guest_function(&self.dispatcher, &self.image, &mut ctx, rip).unwrap_or(0)
+    }
+}
+
 impl ThreadSpawner for CliThreadSpawner {
     fn spawn(&self, start_rip: u64, param: u64) -> Option<ThreadFinished> {
         let finished: ThreadFinished = Arc::new(AtomicBool::new(false));
@@ -624,6 +653,14 @@ pub fn run_pe_with_dir(bytes: &[u8], dll_dir: Option<&std::path::Path>) -> Resul
     // image + dispatcher. Once registered the static lives forever, so
     // we deliberately keep the Arc clones owned by the spawner.
     quantum_runtime::thread_registry::register(Box::new(CliThreadSpawner {
+        dispatcher: Arc::clone(&disp),
+        image: Arc::clone(&image),
+    }));
+
+    // Register a CallbackInvoker so user32 thunks (DispatchMessageW,
+    // SendMessageW) can call guest WNDPROCs back through the same
+    // dispatcher.
+    quantum_runtime::callback_registry::register(Box::new(CliCallbackInvoker {
         dispatcher: Arc::clone(&disp),
         image: Arc::clone(&image),
     }));
