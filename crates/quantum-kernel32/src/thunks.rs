@@ -32,6 +32,23 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("gdi32.dll") {
         return crate::gdi32::resolve(function);
     }
+    if dll.eq_ignore_ascii_case("msvcrt.dll")
+        || dll.eq_ignore_ascii_case("ucrtbase.dll")
+        || dll.eq_ignore_ascii_case("vcruntime140.dll")
+        || dll.eq_ignore_ascii_case("vcruntime140_1.dll")
+        || dll.eq_ignore_ascii_case("msvcr100.dll")
+        || dll.eq_ignore_ascii_case("msvcr110.dll")
+        || dll.eq_ignore_ascii_case("msvcr120.dll")
+        || dll.eq_ignore_ascii_case("msvcp100.dll")
+        || dll.eq_ignore_ascii_case("msvcp140.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-crt-runtime-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-crt-string-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-crt-stdio-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-crt-heap-l1-1-0.dll")
+        || dll.eq_ignore_ascii_case("api-ms-win-crt-utility-l1-1-0.dll")
+    {
+        return crate::msvcrt::resolve(function);
+    }
     if dll.eq_ignore_ascii_case("advapi32.dll") {
         return crate::advapi32::resolve(function);
     }

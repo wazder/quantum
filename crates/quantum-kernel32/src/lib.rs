@@ -17,6 +17,7 @@ pub mod heap;
 pub mod io;
 pub mod misc_win;
 pub mod modules;
+pub mod msvcrt;
 pub mod process;
 pub mod seh;
 pub mod steam;
