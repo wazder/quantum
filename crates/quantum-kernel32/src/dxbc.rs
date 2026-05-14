@@ -557,6 +557,128 @@ pub fn decode_operand(tokens: &[u32], cursor: usize) -> Option<(Operand, usize)>
     ))
 }
 
+// ---------- ISGN / OSGN signature parser ----------
+//
+// `ISGN` and `OSGN` chunks describe the inputs / outputs each shader
+// stage actually consumes / produces. The MSL emitter walks them to
+// build `[[stage_in]]` / `[[stage_out]]` structs, pick `[[vertex]]`
+// vs `[[fragment]]` function attributes, and route vertex-shader
+// outputs into pixel-shader inputs.
+//
+// Chunk layout (little-endian throughout):
+//   u32 element_count
+//   u32 reserved        (usually 8 — offset of first element from
+//                         the start of the chunk payload)
+//   per element (24 bytes):
+//     u32 name_offset   (from start of chunk payload)
+//     u32 semantic_index
+//     u32 system_value  (D3D_NAME_*)
+//     u32 component_type (1=UINT32, 2=SINT32, 3=FLOAT32)
+//     u32 register
+//     u32 mask          (low 4 bits = which components present;
+//                         next 4 bits = mask in use by the stage)
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentType {
+    Uint32,
+    Sint32,
+    Float32,
+    Unknown(u32),
+}
+
+impl ComponentType {
+    fn from_raw(v: u32) -> Self {
+        match v {
+            1 => Self::Uint32,
+            2 => Self::Sint32,
+            3 => Self::Float32,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// Map to a Metal Shading Language base type name (`int`, `uint`,
+    /// `float`). Returns `"float"` for unknown — the most permissive
+    /// default for unrecognised inputs.
+    pub fn metal_base(&self) -> &'static str {
+        match self {
+            Self::Uint32 => "uint",
+            Self::Sint32 => "int",
+            Self::Float32 => "float",
+            Self::Unknown(_) => "float",
+        }
+    }
+}
+
+/// One element of an ISGN / OSGN chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureElement {
+    /// Semantic name (`SV_Position`, `COLOR`, `TEXCOORD`, ...).
+    pub semantic_name: String,
+    pub semantic_index: u32,
+    /// D3D_NAME enum value; 0 = D3D_NAME_UNDEFINED (no system value).
+    pub system_value: u32,
+    pub component_type: ComponentType,
+    pub register: u32,
+    /// Low 4 bits are the components present (bit 0 = .x, bit 3 = .w).
+    pub mask: u8,
+    /// Next 4 bits of the mask DWORD — components actually
+    /// read/written by the stage. Typically equals `mask` for VS
+    /// outputs and PS inputs that are wired up.
+    pub used_mask: u8,
+}
+
+/// Parse an ISGN / OSGN chunk payload into a list of signature elements.
+pub fn parse_signature(chunk_payload: &[u8]) -> Result<Vec<SignatureElement>, DecodeError> {
+    if chunk_payload.len() < 8 {
+        return Err(DecodeError::HeaderTooShort);
+    }
+    let count = u32::from_le_bytes(chunk_payload[0..4].try_into().unwrap()) as usize;
+    let elem_start =
+        u32::from_le_bytes(chunk_payload[4..8].try_into().unwrap()) as usize;
+    let elem_stride = 24usize;
+    if elem_start + count * elem_stride > chunk_payload.len() {
+        return Err(DecodeError::InstructionOob {
+            word_offset: elem_start,
+            length: (count * elem_stride) as u32,
+        });
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = elem_start + i * elem_stride;
+        let read_u32 = |off| u32::from_le_bytes(chunk_payload[base + off..base + off + 4].try_into().unwrap());
+        let name_off = read_u32(0) as usize;
+        let semantic_index = read_u32(4);
+        let system_value = read_u32(8);
+        let component_type = ComponentType::from_raw(read_u32(12));
+        let register = read_u32(16);
+        let mask_dword = read_u32(20);
+        let mask = (mask_dword & 0x0F) as u8;
+        let used_mask = ((mask_dword >> 8) & 0x0F) as u8;
+        // Name strings are NUL-terminated ASCII inside the same chunk
+        // payload, starting at `name_off` (an offset relative to the
+        // payload).
+        let mut name = String::new();
+        if name_off < chunk_payload.len() {
+            for &b in &chunk_payload[name_off..] {
+                if b == 0 {
+                    break;
+                }
+                name.push(b as char);
+            }
+        }
+        out.push(SignatureElement {
+            semantic_name: name,
+            semantic_index,
+            system_value,
+            component_type,
+            register,
+            mask,
+            used_mask,
+        });
+    }
+    Ok(out)
+}
+
 // ---------- Minimal MSL emitter ----------
 //
 // Emits Metal Shading Language source for the handful of DXBC opcodes
@@ -982,6 +1104,95 @@ mod tests {
             "MOV should lower to assignment; got:\n{msl}"
         );
         assert!(msl.contains("return;"));
+    }
+
+    /// Build a hand-crafted ISGN/OSGN chunk payload with the given
+    /// elements. Names are concatenated NUL-terminated after the
+    /// fixed-size element records.
+    fn build_signature_payload(elements: &[(&str, u32, u32, ComponentType, u32, u8, u8)]) -> Vec<u8> {
+        let count = elements.len();
+        let elem_start = 8u32 + (count as u32 * 24);
+        let mut out = Vec::new();
+        out.extend_from_slice(&(count as u32).to_le_bytes());
+        out.extend_from_slice(&8u32.to_le_bytes());
+        // Compute name offsets.
+        let mut name_offsets: Vec<u32> = Vec::with_capacity(count);
+        let mut name_blob: Vec<u8> = Vec::new();
+        for (name, _, _, _, _, _, _) in elements {
+            name_offsets.push(elem_start + name_blob.len() as u32);
+            name_blob.extend_from_slice(name.as_bytes());
+            name_blob.push(0);
+        }
+        for (i, (_, sem_idx, sys_val, comp_ty, reg, mask, used)) in elements.iter().enumerate() {
+            out.extend_from_slice(&name_offsets[i].to_le_bytes());
+            out.extend_from_slice(&sem_idx.to_le_bytes());
+            out.extend_from_slice(&sys_val.to_le_bytes());
+            let comp_raw: u32 = match comp_ty {
+                ComponentType::Uint32 => 1,
+                ComponentType::Sint32 => 2,
+                ComponentType::Float32 => 3,
+                ComponentType::Unknown(v) => *v,
+            };
+            out.extend_from_slice(&comp_raw.to_le_bytes());
+            out.extend_from_slice(&reg.to_le_bytes());
+            let mask_dword: u32 = (*mask as u32) | ((*used as u32) << 8);
+            out.extend_from_slice(&mask_dword.to_le_bytes());
+        }
+        out.extend_from_slice(&name_blob);
+        out
+    }
+
+    #[test]
+    fn parse_signature_decodes_single_position_input() {
+        let blob = build_signature_payload(&[(
+            "SV_Position",
+            0,
+            1, // D3D_NAME_POSITION
+            ComponentType::Float32,
+            0,
+            0b1111,
+            0b1111,
+        )]);
+        let sig = parse_signature(&blob).expect("sig parses");
+        assert_eq!(sig.len(), 1);
+        let e = &sig[0];
+        assert_eq!(e.semantic_name, "SV_Position");
+        assert_eq!(e.semantic_index, 0);
+        assert_eq!(e.system_value, 1);
+        assert_eq!(e.component_type, ComponentType::Float32);
+        assert_eq!(e.register, 0);
+        assert_eq!(e.mask, 0b1111);
+        assert_eq!(e.used_mask, 0b1111);
+    }
+
+    #[test]
+    fn parse_signature_decodes_two_inputs() {
+        let blob = build_signature_payload(&[
+            ("POSITION", 0, 0, ComponentType::Float32, 0, 0b1111, 0b1111),
+            ("COLOR", 0, 0, ComponentType::Float32, 1, 0b1111, 0b1111),
+        ]);
+        let sig = parse_signature(&blob).unwrap();
+        assert_eq!(sig.len(), 2);
+        assert_eq!(sig[0].semantic_name, "POSITION");
+        assert_eq!(sig[1].semantic_name, "COLOR");
+        assert_eq!(sig[1].register, 1);
+    }
+
+    #[test]
+    fn parse_signature_rejects_truncated_blob() {
+        // 4 bytes is shorter than the 8-byte header.
+        assert!(matches!(
+            parse_signature(&[0; 4]),
+            Err(DecodeError::HeaderTooShort)
+        ));
+    }
+
+    #[test]
+    fn component_type_maps_to_metal_base() {
+        assert_eq!(ComponentType::Uint32.metal_base(), "uint");
+        assert_eq!(ComponentType::Sint32.metal_base(), "int");
+        assert_eq!(ComponentType::Float32.metal_base(), "float");
+        assert_eq!(ComponentType::Unknown(99).metal_base(), "float");
     }
 
     #[test]
