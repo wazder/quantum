@@ -95,10 +95,84 @@ struct DeviceVtbl {
 
 unsafe impl Sync for DeviceVtbl {}
 
-/// ID3D11Device::CreateVertexShader vtable slot — per `<d3d11.h>`.
+/// ID3D11Device::CreateBuffer vtable slot — per `<d3d11.h>`.
+const D3D11_DEVICE_CREATE_BUFFER_SLOT: usize = 3;
+/// ID3D11Device::CreateVertexShader vtable slot.
 const D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT: usize = 12;
 /// ID3D11Device::CreatePixelShader vtable slot.
 const D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT: usize = 15;
+
+/// D3D11_BUFFER_DESC layout — exactly 6 × u32 = 24 bytes.
+#[repr(C)]
+struct BufferDesc {
+    byte_width: u32,
+    usage: u32,
+    bind_flags: u32,
+    cpu_access_flags: u32,
+    misc_flags: u32,
+    structure_byte_stride: u32,
+}
+
+/// D3D11_SUBRESOURCE_DATA layout — 24 bytes on x64.
+#[repr(C)]
+struct SubresourceData {
+    p_sys_mem: *const c_void,
+    sys_mem_pitch: u32,
+    sys_mem_slice_pitch: u32,
+}
+
+/// `HRESULT ID3D11Device::CreateBuffer(const D3D11_BUFFER_DESC*,
+///                                      const D3D11_SUBRESOURCE_DATA*,
+///                                      ID3D11Buffer**)`
+///
+/// Allocates a real `MTLBuffer` of the requested size in unified
+/// memory and (optionally) copies initial data into it. The returned
+/// `ppBuffer` slot gets a `BufferObject` whose first qword is a vtable
+/// pointer compatible with `ID3D11Resource`-shaped queries from the
+/// guest. Returns S_OK on success, E_NOTIMPL on bad inputs.
+extern "C" fn d3d11_create_buffer(
+    _this: *mut c_void,
+    p_desc: *const c_void,
+    p_initial_data: *const c_void,
+    pp_buffer: *mut *mut c_void,
+) -> i32 {
+    if p_desc.is_null() {
+        return E_NOTIMPL;
+    }
+    // SAFETY: the caller (a DX11 guest) is contractually required to
+    // pass a properly aligned, fully populated `D3D11_BUFFER_DESC`.
+    let desc = unsafe { &*(p_desc as *const BufferDesc) };
+    if desc.byte_width == 0 {
+        return E_NOTIMPL;
+    }
+    let init_ptr: *const c_void = if p_initial_data.is_null() {
+        core::ptr::null()
+    } else {
+        // SAFETY: same contract — caller guarantees a valid
+        // `D3D11_SUBRESOURCE_DATA` pointer when non-null.
+        let init = unsafe { &*(p_initial_data as *const SubresourceData) };
+        init.p_sys_mem
+    };
+    let mtl = crate::cocoa::metal_new_buffer(desc.byte_width as usize, init_ptr);
+    if mtl.is_null() {
+        return E_NOTIMPL;
+    }
+    if !pp_buffer.is_null() {
+        // For now we hand back the raw MTLBuffer pointer. The guest
+        // treats it as opaque (its only handle on the buffer); real
+        // ID3D11Buffer vtable indirection lands when the draw path
+        // starts using IASetVertexBuffers et al.
+        unsafe {
+            *pp_buffer = mtl;
+        }
+    } else {
+        // Caller threw away the handle; we can't track it, so
+        // immediately release to avoid a leak. Apps that pass NULL
+        // here are non-conformant anyway.
+        crate::cocoa::release(mtl);
+    }
+    S_OK
+}
 
 /// `HRESULT ID3D11Device::CreateVertexShader(LPCVOID pShaderBytecode,
 ///                                            SIZE_T BytecodeLength,
@@ -189,6 +263,8 @@ fn device_vtbl() -> &'static DeviceVtbl {
         slots[0] = d3d11_qi as *const () as usize;
         slots[1] = d3d11_addref as *const () as usize;
         slots[2] = d3d11_release as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_BUFFER_SLOT] =
+            d3d11_create_buffer as *const () as usize;
         slots[D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT] =
             d3d11_create_vertex_shader as *const () as usize;
         slots[D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT] =

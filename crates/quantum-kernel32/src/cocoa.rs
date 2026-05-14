@@ -443,6 +443,61 @@ pub fn next_drawable(layer: *mut c_void) -> *mut c_void {
     msg_send_obj(layer, sel("nextDrawable\0"))
 }
 
+/// Allocate an `MTLBuffer` of `byte_len` bytes in shared CPU/GPU
+/// memory (`MTLResourceStorageModeShared` = 0). Returns a retained
+/// `id<MTLBuffer>` (caller owns one +1 ref). Null on failure.
+///
+/// `initial_data` (when non-null) is copied into the buffer's
+/// `contents` pointer; `initial_data_len` is the byte count.
+pub fn metal_new_buffer(byte_len: usize, initial_data: *const c_void) -> *mut c_void {
+    if byte_len == 0 {
+        return core::ptr::null_mut();
+    }
+    let device = metal_default_device();
+    if device.is_null() {
+        return core::ptr::null_mut();
+    }
+    let sel_new = sel("newBufferWithLength:options:\0");
+    type F = unsafe extern "C" fn(Object, Sel, usize, u64) -> Object;
+    // SAFETY: device is the autoreleased MTLDevice from
+    // MTLCreateSystemDefaultDevice; the selector + signature match
+    // Apple's documented MTLDevice protocol.
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    // options=0 → MTLResourceStorageModeShared, which is the unified
+    // memory mode on Apple Silicon (zero-copy CPU↔GPU access).
+    let buf = unsafe { f(device, sel_new, byte_len, 0) };
+    if buf.is_null() {
+        return core::ptr::null_mut();
+    }
+    if !initial_data.is_null() {
+        // Get the buffer's CPU-visible pointer via [buf contents] and
+        // memcpy.
+        let contents_sel = sel("contents\0");
+        type FPtr = unsafe extern "C" fn(Object, Sel) -> *mut c_void;
+        let fc: FPtr = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+        let contents = unsafe { fc(buf, contents_sel) };
+        if !contents.is_null() {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    initial_data as *const u8,
+                    contents as *mut u8,
+                    byte_len,
+                );
+            }
+        }
+    }
+    buf
+}
+
+/// Release a Metal object — `[obj release]`. Decrements the retain
+/// count. Pair with the allocator that returned a +1 ref.
+pub fn release(obj: *mut c_void) {
+    if obj.is_null() {
+        return;
+    }
+    msg_send_void(obj, sel("release\0"));
+}
+
 /// NSEvent kind. Values from `<AppKit/NSEvent.h>` (NSEventType enum).
 ///
 /// # Safety
