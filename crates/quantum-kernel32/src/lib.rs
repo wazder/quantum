@@ -9,6 +9,7 @@
 pub mod advapi32;
 pub mod cocoa;
 pub mod d3d11;
+pub mod dxbc;
 pub mod file_io;
 pub mod gdi32;
 pub mod handles;
