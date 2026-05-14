@@ -74,6 +74,14 @@ impl CodeCache {
     pub fn base(&self) -> *mut u8 {
         self.region.base()
     }
+
+    /// Borrow the underlying MachVmManager so the dispatcher can flip
+    /// W^X protection on individual instruction words (for chain
+    /// patching). The cache owns this manager for the lifetime of the
+    /// region; the returned reference is valid as long as `self` is.
+    pub fn host_mem(&self) -> &MachVmManager {
+        &self.mem
+    }
 }
 
 #[cfg(test)]

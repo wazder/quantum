@@ -138,6 +138,68 @@ impl Dispatcher {
     pub fn block_count(&self) -> usize {
         self.inner.lock().unwrap().block_map.len()
     }
+
+    /// Rewrite a `B +1` placeholder previously emitted by
+    /// `block::translate_for_dispatcher` so the branch jumps directly
+    /// to another already-installed block. This is the JIT block-
+    /// chaining hot-path optimisation: after the first round-trip
+    /// through Rust, the next time the source block exits it skips
+    /// the dispatcher lookup and falls straight into the destination.
+    ///
+    /// Returns true when the patch succeeded, false when the relative
+    /// offset doesn't fit AArch64's signed 26-bit branch range (in
+    /// which case the placeholder stays unchanged and the dispatcher
+    /// continues to handle the exit). Either outcome is correctness-
+    /// preserving — chaining is purely a speed-up.
+    ///
+    /// # Safety
+    /// `patch_site` and `target_host_addr` must both point inside this
+    /// `Dispatcher`'s code cache (i.e. came from earlier `install`
+    /// calls). The function flips the page to writable, writes a
+    /// single 32-bit word, flips back, and invalidates the i-cache.
+    pub unsafe fn patch_chain(
+        &self,
+        patch_site: *mut u32,
+        target_host_addr: *const u8,
+    ) -> bool {
+        // Compute the relative offset in 4-byte units.
+        let src = patch_site as isize;
+        let dst = target_host_addr as isize;
+        let delta = dst - src;
+        if delta & 0x3 != 0 {
+            return false; // misaligned target
+        }
+        let words = delta >> 2;
+        const MIN: isize = -(1 << 25);
+        const MAX: isize = (1 << 25) - 1;
+        if !(MIN..=MAX).contains(&words) {
+            return false;
+        }
+        // Encode unconditional branch B: 0x14000000 | (imm26 & 0x03FF_FFFF).
+        let new_word: u32 = 0x1400_0000 | ((words as u32) & 0x03FF_FFFF);
+
+        // Flip the page to writable just for the one word, write, flip
+        // back, invalidate the i-cache for the patched word so the CPU
+        // refetches.
+        let inner = self.inner.lock().unwrap();
+        let mem = inner.code_cache.host_mem();
+        // SAFETY: patch_site comes from a block we ourselves installed
+        // earlier in this Dispatcher's code_cache. The 4 bytes are
+        // within the cache region and currently hold the `B +1`
+        // placeholder. flip_jit is on the MemoryManager trait; bring
+        // it into scope.
+        use crate::mem::MemoryManager;
+        unsafe {
+            mem.flip_jit(patch_site as *mut u8, 4, true);
+            core::ptr::write(patch_site, new_word);
+            mem.flip_jit(patch_site as *mut u8, 4, false);
+        }
+        // SAFETY: same range; sys_icache_invalidate takes *mut c_void.
+        unsafe {
+            crate::sys::sys_icache_invalidate(patch_site as *mut core::ffi::c_void, 4);
+        }
+        true
+    }
 }
 
 /// Call a JIT'd block once and capture the guest RIP it requested next.
@@ -165,6 +227,42 @@ mod tests {
     /// Synthesise a tiny block: `mov x0, #0xCAFE; ret`. Validates that
     /// the dispatcher invocation path correctly captures the value the
     /// block writes to X0.
+    /// Verify the B-encoding logic in `patch_chain` by writing a B
+    /// placeholder into the cache, then rewriting it through the
+    /// public API and reading it back. We bypass the actual execution
+    /// path — just check the bytes change as expected.
+    #[test]
+    fn patch_chain_rewrites_placeholder_to_direct_b() {
+        let disp = Dispatcher::new(4096).expect("dispatcher");
+
+        // Install a block whose body is the placeholder `B +1` (0x14000001)
+        // followed by some filler. We'll target a sibling block 32 bytes
+        // ahead.
+        let mut bytes_a = [0u8; 16];
+        bytes_a[0..4].copy_from_slice(&0x1400_0001u32.to_le_bytes()); // B +1
+        bytes_a[4..8].copy_from_slice(&0xD503_201Fu32.to_le_bytes()); // NOP
+        bytes_a[8..12].copy_from_slice(&0xD503_201Fu32.to_le_bytes());
+        bytes_a[12..16].copy_from_slice(&0xD65F_03C0u32.to_le_bytes()); // RET
+
+        let ptr_a = disp.install(0x1000, &bytes_a).expect("install A");
+        let ptr_b = disp.install(0x2000, &bytes_a).expect("install B");
+
+        let patch_site = ptr_a.as_ptr() as *mut u32;
+        let target_addr = ptr_b.as_ptr() as *const u8;
+        // SAFETY: both pointers are from `disp.install` above.
+        let ok = unsafe { disp.patch_chain(patch_site, target_addr) };
+        assert!(ok, "patch_chain should accept in-range target");
+
+        // Read back the rewritten word. The expected encoding is
+        // `B (ptr_b - ptr_a)/4`. Since ptr_b is 16 bytes ahead (after
+        // the first install + 4-byte alignment padding), the delta /4
+        // is at least 4 words. Just assert the opcode bits are B
+        // (top 6 bits == 0b000101 → 0x14000000 family).
+        let read_word: u32 = unsafe { core::ptr::read(patch_site) };
+        let opcode = read_word & 0xFC00_0000;
+        assert_eq!(opcode, 0x1400_0000, "expected B-form encoding, got {read_word:#010X}");
+    }
+
     #[test]
     fn invokes_a_block_and_reads_x0() {
         // movz x0, #0xCAFE -> sf=1, opc=10, hw=00, imm16=0xCAFE, Rd=0

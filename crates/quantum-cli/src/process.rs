@@ -995,6 +995,16 @@ fn run_dispatcher_loop(
     let trace = std::env::var("QUANTUM_TRACE_BLOCKS").is_ok();
     let mut current_rip = start_rip;
     let mut iters = 0;
+    // Block-chaining bookkeeping:
+    //   chain_sites: guest_rip → (patch_site_addr, target_rip) for every
+    //                 translated block whose Op::Jmp terminator left us
+    //                 a `B +1` placeholder.
+    //   pending: set whenever we just ran a block with chain info, so the
+    //            NEXT iteration can patch it once the target's host
+    //            address is known.
+    let mut chain_sites: std::collections::HashMap<u64, (*mut u32, u64)> =
+        std::collections::HashMap::new();
+    let mut pending: Option<(*mut u32, u64)> = None;
     loop {
         iters += 1;
         if iters > 10_000_000 {
@@ -1030,9 +1040,44 @@ fn run_dispatcher_loop(
             };
             let block = block::translate_for_dispatcher(&bytes, current_rip, mode)
                 .map_err(|e| RunError::Translate(format!("at {current_rip:#x}: {e:?}")))?;
-            disp.install(current_rip, &block.host_bytes)
-                .map_err(RunError::Dispatcher)?
+            let host_ptr = disp
+                .install(current_rip, &block.host_bytes)
+                .map_err(RunError::Dispatcher)?;
+            // If this block has a chainable terminator, remember where
+            // the `B +1` placeholder lives so a later iteration can
+            // rewrite it.
+            if let (Some(off), Some(target)) =
+                (block.chain_patch_offset, block.chain_target)
+            {
+                let site = unsafe { host_ptr.as_ptr().add(off as usize) as *mut u32 };
+                chain_sites.insert(current_rip, (site, target));
+            }
+            host_ptr
         };
+
+        // Patch the previous block's exit if it was waiting for this rip.
+        // Chain B targets the hot entry of the destination block (i.e.
+        // start + DISPATCHER_HOT_ENTRY_OFFSET) so the destination skips
+        // its cold prologue's pushes — the chained-from block left the
+        // frame intact.
+        if let Some((site, target_rip)) = pending.take()
+            && target_rip == current_rip
+        {
+            let hot = unsafe {
+                (ptr.as_ptr() as *const u8)
+                    .add(quantum_jit::block::DISPATCHER_HOT_ENTRY_OFFSET as usize)
+            };
+            // SAFETY: both site and hot point inside the dispatcher's
+            // code cache (we installed both via `disp.install`).
+            unsafe {
+                disp.patch_chain(site, hot);
+            }
+        }
+
+        // Set up pending patch for the block we're about to invoke.
+        if let Some(&(site, target)) = chain_sites.get(&current_rip) {
+            pending = Some((site, target));
+        }
 
         LAST_ENTERED_RIP.store(current_rip, Ordering::SeqCst);
         // SAFETY: block respects the dispatcher prologue/epilogue

@@ -63,6 +63,15 @@ impl From<FinishError> for BlockError {
 pub struct Block {
     pub host_bytes: Vec<u8>,
     pub guest_len: usize,
+    /// Byte offset of a `B +1` placeholder we can rewrite into a
+    /// direct branch to the next block's host code. Set only for
+    /// blocks whose terminator has a single, statically-known target
+    /// (currently: `Op::Jmp` rel32). `None` for everything else.
+    pub chain_patch_offset: Option<u32>,
+    /// Guest RIP the chain B should resolve to, once that block is
+    /// translated. Tracked alongside the patch offset; the dispatcher
+    /// performs the rewrite the first time it observes both sides.
+    pub chain_target: Option<u64>,
 }
 
 /// Detect a Steam-DRM `int3; jmp -3` anti-debug trap at the start of
@@ -98,6 +107,18 @@ fn detect_drm_int3_trap(insts: &[Inst]) -> Option<u64> {
 /// Must match `quantum_runtime::dispatcher::STOP_SENTINEL`. Re-declared
 /// here to keep quantum-jit free of a runtime dependency.
 pub const STOP_SENTINEL: u64 = 0xDEAD_DEAD_DEAD_DEAD;
+
+/// Byte offset within a dispatcher block where chained execution can
+/// re-enter, skipping the cold prologue that already pushed the host
+/// frame and captured the ctx pointer. The cold prologue is:
+///   stp x29, x30          (4 bytes)
+///   stp x19, x28          (4 bytes)
+///   stp x24, x25          (4 bytes)
+///   mov x28, x0           (4 bytes)
+/// = 16 bytes. After that, `emit_ctx_to_regs` reloads guest GPRs from
+/// the ctx pointed at by X28 — which is still valid on a chain entry
+/// because X28 is AAPCS64 callee-saved and the lifter never touches it.
+pub const DISPATCHER_HOT_ENTRY_OFFSET: u32 = 16;
 
 /// Guest ISA mode for translation. PE32+ images are `Long`; legacy
 /// 32-bit PE32 images are `Legacy32`. The decoder uses different
@@ -149,6 +170,10 @@ pub fn translate_for_dispatcher(
     let guest_len = decoder.pos();
 
     let mut emitter = Emitter::new();
+
+    // Chain-patch metadata populated by the Op::Jmp arm below.
+    let mut chain_jmp_patch_offset: Option<u32> = None;
+    let mut chain_jmp_target: Option<u64> = None;
 
     // (We used to peephole the Steam DRM `int3; jmp -3` trap into a no-op
     // that skipped past both instructions. That was wrong when a DRM
@@ -236,7 +261,27 @@ pub fn translate_for_dispatcher(
                 .guest_rip
                 .wrapping_add(term.len as u64)
                 .wrapping_add(rel as u64);
-            emit_epilogue_const_rip(&mut emitter, target);
+            // Chainable terminator. Layout:
+            //   emit_regs_to_ctx       ; spill guest regs to ctx
+            //   <chain_patch> B +1     ; placeholder
+            //   load_const64 X0, target
+            //   emit_host_epilogue     ; pop frame + ret to dispatcher
+            //
+            // Cold path falls through the B and runs the load + pops +
+            // ret. Hot path (after the dispatcher patches the B to a
+            // direct branch into the target block's hot entry) skips
+            // the load + pops + ret and lands inside the next block at
+            // its `emit_ctx_to_regs` — keeping the host frame intact
+            // for the whole chain. Spill+reload on every hop is
+            // wasteful but correctness-preserving; a future commit
+            // can flow-analyse regs to elide some spills.
+            emit_regs_to_ctx(&mut emitter);
+            chain_jmp_patch_offset = Some(emitter.bytes().len() as u32);
+            emitter.raw_word(0x1400_0001);
+            chain_jmp_target = Some(target);
+            use crate::emitter::Reg;
+            emitter.load_const64(Reg::X0, target);
+            emit_host_epilogue(&mut emitter);
         }
         Op::Call => {
             // Direct CALL rel32: push return address on guest stack and
@@ -315,6 +360,8 @@ pub fn translate_for_dispatcher(
     Ok(Block {
         host_bytes: emitter.bytes(),
         guest_len,
+        chain_patch_offset: chain_jmp_patch_offset,
+        chain_target: chain_jmp_target,
     })
 }
 
@@ -494,5 +541,7 @@ pub fn translate_with_stack(
     Ok(Block {
         host_bytes: emitter.bytes(),
         guest_len,
+        chain_patch_offset: None,
+        chain_target: None,
     })
 }
