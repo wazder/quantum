@@ -61,6 +61,16 @@ impl MappedSection {
     }
 }
 
+/// Width of the guest ISA the image was compiled for. PE32 → 32-bit,
+/// PE32+ → 64-bit. We re-export it from the loader so the JIT can
+/// pick the right decoder rules without having to keep the original
+/// `PeFile` alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bitness {
+    X86,
+    X86_64,
+}
+
 #[derive(Debug)]
 pub struct LoadedImage {
     region: Region,
@@ -70,6 +80,7 @@ pub struct LoadedImage {
     pub size_of_headers: u32,
     pub entry_rva: u32,
     pub subsystem: u16,
+    pub bitness: Bitness,
     pub sections: Vec<MappedSection>,
     pub data_directories: [DataDirectory; 16],
 }
@@ -227,6 +238,11 @@ pub fn load(pe: &PeFile<'_>, mem: &dyn MemoryManager) -> Result<LoadedImage> {
 
     let actual_base = region.base() as u64;
 
+    let bitness = match pe.opt.kind {
+        crate::pe::PeKind::Pe32 => Bitness::X86,
+        crate::pe::PeKind::Pe32Plus => Bitness::X86_64,
+    };
+
     Ok(LoadedImage {
         region,
         preferred_base: pe.opt.image_base,
@@ -235,6 +251,7 @@ pub fn load(pe: &PeFile<'_>, mem: &dyn MemoryManager) -> Result<LoadedImage> {
         size_of_headers: pe.opt.size_of_headers,
         entry_rva: pe.opt.address_of_entry_point,
         subsystem: pe.opt.subsystem,
+        bitness,
         sections,
         data_directories: pe.opt.data_directories,
     })

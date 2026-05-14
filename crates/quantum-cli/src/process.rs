@@ -990,7 +990,11 @@ fn run_dispatcher_loop(
                     &bytes[..32.min(bytes.len())]
                 );
             }
-            let block = block::translate_for_dispatcher(&bytes, current_rip, None)
+            let mode = match image.bitness {
+                quantum_loader::Bitness::X86 => quantum_jit::block::IsaMode::Legacy32,
+                quantum_loader::Bitness::X86_64 => quantum_jit::block::IsaMode::Long,
+            };
+            let block = block::translate_for_dispatcher(&bytes, current_rip, mode)
                 .map_err(|e| RunError::Translate(format!("at {current_rip:#x}: {e:?}")))?;
             disp.install(current_rip, &block.host_bytes)
                 .map_err(RunError::Dispatcher)?

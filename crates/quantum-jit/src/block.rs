@@ -99,6 +99,15 @@ fn detect_drm_int3_trap(insts: &[Inst]) -> Option<u64> {
 /// here to keep quantum-jit free of a runtime dependency.
 pub const STOP_SENTINEL: u64 = 0xDEAD_DEAD_DEAD_DEAD;
 
+/// Guest ISA mode for translation. PE32+ images are `Long`; legacy
+/// 32-bit PE32 images are `Legacy32`. The decoder uses different
+/// prefix and default-operand-size rules between the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsaMode {
+    Long,
+    Legacy32,
+}
+
 /// Translate one basic block in dispatcher mode.
 ///
 /// "Basic block" here means: instructions starting at `start_rip` and
@@ -116,11 +125,14 @@ pub const STOP_SENTINEL: u64 = 0xDEAD_DEAD_DEAD_DEAD;
 pub fn translate_for_dispatcher(
     bytes: &[u8],
     start_rip: u64,
-    _stack_top: Option<u64>,
+    mode: IsaMode,
 ) -> Result<Block, BlockError> {
     use crate::emitter::Reg;
 
-    let mut decoder = Decoder::new(bytes, start_rip);
+    let mut decoder = match mode {
+        IsaMode::Long => Decoder::new(bytes, start_rip),
+        IsaMode::Legacy32 => Decoder::new_legacy32(bytes, start_rip),
+    };
     let mut insts: Vec<Inst> = Vec::new();
 
     loop {

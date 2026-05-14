@@ -117,7 +117,7 @@ fn run_pe_from_disk_returns_exit_code() {
             } else {
                 let rva = (rip - image.actual_base) as u32;
                 let bytes: Vec<u8> = image.rva_to_slice(rva, 64).unwrap().to_vec();
-                let block = block::translate_for_dispatcher(&bytes, rip, None).unwrap();
+                let block = block::translate_for_dispatcher(&bytes, rip, quantum_jit::block::IsaMode::Long).unwrap();
                 disp.install(rip, &block.host_bytes).unwrap()
             };
             let next = unsafe { invoke_block_with_ctx(ptr, &mut ctx) };

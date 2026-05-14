@@ -51,6 +51,12 @@ pub struct Decoder<'a> {
     bytes: &'a [u8],
     pos: usize,
     guest_rip: u64,
+    /// `true` for x86_64 long mode (REX prefix valid, default operand
+    /// size 32 with REX.W → 64). `false` for legacy 32-bit protected
+    /// mode (no REX; bytes 0x40..0x4F are INC/DEC; default operand size
+    /// 32 without promotion to 64). Steam's bootstrap `steam.exe` is
+    /// 32-bit Win32; that's the use case driving this flag.
+    long_mode: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -59,7 +65,22 @@ impl<'a> Decoder<'a> {
             bytes,
             pos: 0,
             guest_rip,
+            long_mode: true,
         }
+    }
+
+    /// Construct a decoder in legacy 32-bit mode. Used for PE32 images.
+    pub fn new_legacy32(bytes: &'a [u8], guest_eip: u64) -> Self {
+        Self {
+            bytes,
+            pos: 0,
+            guest_rip: guest_eip,
+            long_mode: false,
+        }
+    }
+
+    pub fn long_mode(&self) -> bool {
+        self.long_mode
     }
 
     pub fn pos(&self) -> usize {
@@ -162,7 +183,7 @@ impl<'a> Decoder<'a> {
                     p.seg = Some(Seg::Gs);
                     self.pos += 1;
                 }
-                0x40..=0x4F => {
+                0x40..=0x4F if self.long_mode => {
                     // REX must be the last prefix before the opcode.
                     p.rex = Rex {
                         w: (b & 0b1000) != 0,
@@ -174,6 +195,9 @@ impl<'a> Decoder<'a> {
                     self.pos += 1;
                     break;
                 }
+                // In legacy 32-bit mode 0x40..0x4F are INC/DEC of
+                // EAX..EDI — they fall through to the primary opcode
+                // table below.
                 _ => break,
             }
         }
@@ -202,7 +226,9 @@ impl<'a> Decoder<'a> {
     }
 
     fn op_size_default32(&self, p: &Prefixes) -> OpSize {
-        match (p.rex.w, p.osize) {
+        // Long mode: REX.W → 64, 0x66 prefix → 16, otherwise 32.
+        // Legacy mode: no REX; 0x66 prefix → 16, otherwise 32.
+        match (self.long_mode && p.rex.w, p.osize) {
             (true, _) => OpSize::B8,
             (false, true) => OpSize::B2,
             (false, false) => OpSize::B4,
@@ -210,8 +236,16 @@ impl<'a> Decoder<'a> {
     }
 
     fn op_size_default64(&self, p: &Prefixes) -> OpSize {
-        // Used for PUSH/POP/CALL/JMP — default 64-bit, OSIZE=66 → 16.
-        if p.osize { OpSize::B2 } else { OpSize::B8 }
+        // PUSH/POP/CALL/JMP defaults. In long mode the default is 64
+        // (regardless of REX.W); 0x66 prefix → 16. In legacy 32-bit
+        // mode the default is 32; 0x66 prefix → 16.
+        if p.osize {
+            OpSize::B2
+        } else if self.long_mode {
+            OpSize::B8
+        } else {
+            OpSize::B4
+        }
     }
 
     fn decode_modrm(
@@ -243,10 +277,23 @@ impl<'a> Decoder<'a> {
         size: OpSize,
     ) -> Result<Operand> {
         let seg = p.seg;
-        // Special case: mod=00, rm=101 → RIP-relative with disp32.
+        // Special case: mod=00, rm=101.
+        // Long mode: RIP-relative with disp32.
+        // Legacy mode: absolute disp32 (no base register).
         if mod_ == 0b00 && rm == 0b101 {
             let disp = self.read_i32()?;
-            return Ok(Operand::RipRel(disp, size));
+            if self.long_mode {
+                return Ok(Operand::RipRel(disp, size));
+            } else {
+                return Ok(Operand::Mem(Mem {
+                    seg,
+                    base: None,
+                    index: None,
+                    scale: 1,
+                    disp,
+                    size,
+                }));
+            }
         }
 
         let (base, index, scale) = if rm == 0b100 {
@@ -336,6 +383,19 @@ impl<'a> Decoder<'a> {
         }
 
         match opcode {
+            // 0x40..=0x47 INC r32 (legacy 32-bit only — in long mode
+            // these bytes are REX prefixes consumed before opcode dispatch)
+            0x40..=0x47 if !self.long_mode => {
+                let size = self.op_size_default32(p);
+                let r = self.opcode_reg_operand(p, opcode - 0x40, size);
+                Ok(make(Op::Inc, [Some(r), None, None], rip))
+            }
+            // 0x48..=0x4F DEC r32 (legacy 32-bit only)
+            0x48..=0x4F if !self.long_mode => {
+                let size = self.op_size_default32(p);
+                let r = self.opcode_reg_operand(p, opcode - 0x48, size);
+                Ok(make(Op::Dec, [Some(r), None, None], rip))
+            }
             // 0x50..=0x57 PUSH r64 (default 64-bit)
             0x50..=0x57 => {
                 let size = self.op_size_default64(p);
@@ -1511,6 +1571,73 @@ mod tests {
             out.push(d.next().expect("decode"));
         }
         out
+    }
+
+    fn dec32(bytes: &[u8]) -> Inst {
+        let mut d = Decoder::new_legacy32(bytes, 0x401000);
+        d.next().expect("decode")
+    }
+
+    #[test]
+    fn legacy32_inc_eax() {
+        // 40 -> INC EAX in legacy mode (REX in long mode)
+        let i = dec32(&[0x40]);
+        assert_eq!(i.op, Op::Inc);
+        assert_eq!(i.len, 1);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+    }
+
+    #[test]
+    fn legacy32_dec_edi() {
+        // 4F -> DEC EDI
+        let i = dec32(&[0x4F]);
+        assert_eq!(i.op, Op::Dec);
+        assert_eq!(i.len, 1);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rdi, OpSize::B4)));
+    }
+
+    #[test]
+    fn legacy32_mov_eax_imm32() {
+        // B8 2A 00 00 00 — same encoding, 32-bit op size
+        let i = dec32(&[0xB8, 0x2A, 0x00, 0x00, 0x00]);
+        assert_eq!(i.op, Op::Mov);
+        assert_eq!(i.len, 5);
+        assert_eq!(i.operands[0], Some(Operand::Reg(GpReg::Rax, OpSize::B4)));
+        assert_eq!(i.operands[1], Some(Operand::Imm(42, OpSize::B4)));
+    }
+
+    #[test]
+    fn legacy32_push_imm32() {
+        // 68 2A 00 00 00 — push 42
+        let i = dec32(&[0x68, 0x2A, 0x00, 0x00, 0x00]);
+        assert_eq!(i.op, Op::Push);
+        assert_eq!(i.len, 5);
+        // In legacy mode push default is 32-bit (B4), not 64-bit
+        assert_eq!(i.operands[0], Some(Operand::Imm(42, OpSize::B4)));
+    }
+
+    #[test]
+    fn legacy32_modrm_disp32_absolute() {
+        // 8B 05 78 56 34 12 — mov eax, [0x12345678] (absolute)
+        // In long mode this would be RIP-relative; in legacy it's absolute.
+        let i = dec32(&[0x8B, 0x05, 0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(i.op, Op::Mov);
+        match i.operands[1] {
+            Some(Operand::Mem(m)) => {
+                assert!(m.base.is_none());
+                assert!(m.index.is_none());
+                assert_eq!(m.disp, 0x12345678);
+                assert_eq!(m.size, OpSize::B4);
+            }
+            other => panic!("expected absolute Mem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy32_ud2() {
+        let i = dec32(&[0x0F, 0x0B]);
+        assert_eq!(i.op, Op::Ud2);
+        assert_eq!(i.len, 2);
     }
 
     #[test]

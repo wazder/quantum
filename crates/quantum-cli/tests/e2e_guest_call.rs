@@ -125,7 +125,7 @@ fn run_via_dispatcher(
             let rva = (current_rip - image.actual_base) as u32;
             let bytes: Vec<u8> = image.rva_to_slice(rva, 64).expect("block bytes").to_vec();
             let block =
-                block::translate_for_dispatcher(&bytes, current_rip, None).expect("translate");
+                block::translate_for_dispatcher(&bytes, current_rip, quantum_jit::block::IsaMode::Long).expect("translate");
             disp.install(current_rip, &block.host_bytes)
                 .expect("install")
         };
