@@ -527,6 +527,62 @@ pub fn metal_present(cmd_buffer: *mut c_void, drawable: *mut c_void) {
     msg_send_void(cmd_buffer, sel("commit\0"));
 }
 
+/// Fill a 2D MTLTexture with a single BGRA8-packed clear color via
+/// `replaceRegion:mipmapLevel:withBytes:bytesPerRow:`. CPU-side fill —
+/// useful as a fallback for ClearRenderTargetView until a real
+/// MTLRenderCommandEncoder path lands.
+///
+/// # Safety
+/// `texture` must be a live `MTLTexture*` whose pixel format is one
+/// of the BGRA8 / RGBA8 family. Width/height must match the texture's
+/// dimensions or be a subset of them.
+pub unsafe fn metal_texture_fill_bgra(
+    texture: *mut c_void,
+    width: u32,
+    height: u32,
+    bgra: [u8; 4],
+) {
+    if texture.is_null() || width == 0 || height == 0 {
+        return;
+    }
+    // Build a single scanline of (width * 4) bytes filled with `bgra`,
+    // then replace the texture region for each row. We do one row at
+    // a time to keep peak allocation small for large back buffers.
+    let stride = width as usize * 4;
+    let mut row = alloc::vec::Vec::with_capacity(stride);
+    for _ in 0..width {
+        row.extend_from_slice(&bgra);
+    }
+    // Region descriptor: MTLRegionMake2D(0, 0, width, height).
+    //   struct MTLRegion { origin: MTLOrigin, size: MTLSize }
+    //   struct MTLOrigin { x: usize, y: usize, z: usize }
+    //   struct MTLSize   { width: usize, height: usize, depth: usize }
+    // -> 48 bytes (six usize's). We pack into [u64; 6] and rebuild per
+    // row inside the loop below.
+    let sel_replace = sel("replaceRegion:mipmapLevel:withBytes:bytesPerRow:\0");
+    type F = unsafe extern "C" fn(
+        Object,
+        Sel,
+        [u64; 6],
+        usize,
+        *const c_void,
+        usize,
+    );
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    // Write each row one at a time to keep alloc tiny. We adjust the
+    // region's origin.y and size.height per call.
+    for y in 0..height as usize {
+        let mut sub: [u64; 6] = [0; 6];
+        sub[1] = y as u64; // origin.y
+        sub[3] = width as u64;
+        sub[4] = 1; // size.height = 1
+        sub[5] = 1; // size.depth
+        unsafe {
+            f(texture, sel_replace, sub, 0, row.as_ptr() as *const c_void, stride);
+        }
+    }
+}
+
 /// Allocate an `MTLTexture` with a 2D-shaped descriptor. `pixel_format`
 /// is an `MTLPixelFormat` enum value (see d3d11 mapping below), `width`
 /// and `height` are pixels. Returns a retained `id<MTLTexture>` or
