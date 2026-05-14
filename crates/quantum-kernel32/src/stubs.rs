@@ -1169,11 +1169,7 @@ pub extern "C" fn GetVersionExA(info: *mut c_void) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn OpenFile(
-    _name: *const i8,
-    _ofstruct: *mut c_void,
-    _style: u32,
-) -> i32 {
+pub extern "C" fn OpenFile(_name: *const i8, _ofstruct: *mut c_void, _style: u32) -> i32 {
     -1 // HFILE_ERROR
 }
 
@@ -1803,9 +1799,17 @@ pub extern "C" fn GetWindowsDirectoryW(buffer: *mut u16, buffer_len: u32) -> u32
         return 10;
     }
     let s: &[u16] = &[
-        b'C' as u16, b':' as u16, b'\\' as u16,
-        b'W' as u16, b'i' as u16, b'n' as u16,
-        b'd' as u16, b'o' as u16, b'w' as u16, b's' as u16, 0,
+        b'C' as u16,
+        b':' as u16,
+        b'\\' as u16,
+        b'W' as u16,
+        b'i' as u16,
+        b'n' as u16,
+        b'd' as u16,
+        b'o' as u16,
+        b'w' as u16,
+        b's' as u16,
+        0,
     ];
     let n = s.len().min(buffer_len as usize);
     for (i, c) in s.iter().enumerate().take(n) {

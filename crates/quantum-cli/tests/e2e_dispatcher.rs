@@ -125,8 +125,12 @@ fn run_via_dispatcher(
                 .rva_to_slice(rva, 64)
                 .expect("block bytes in-bounds")
                 .to_vec();
-            let block =
-                block::translate_for_dispatcher(&bytes, current_rip, quantum_jit::block::IsaMode::Long).expect("translate");
+            let block = block::translate_for_dispatcher(
+                &bytes,
+                current_rip,
+                quantum_jit::block::IsaMode::Long,
+            )
+            .expect("translate");
             disp.install(current_rip, &block.host_bytes)
                 .expect("install")
         };

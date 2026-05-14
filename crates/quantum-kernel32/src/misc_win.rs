@@ -559,12 +559,24 @@ pub fn resolve_wsock32(function: &str) -> Option<u64> {
         // #108 WSASetLastError (wsock32-specific ordinal)
         // #109 WSACancelBlockingCall
         // #110 WSAIsBlocking
-        "#101" | "#102" | "#103" | "#104" | "#105" | "#106" | "#107" | "#108"
-        | "#109" | "#110" | "WSAAsyncSelect" | "WSAAsyncGetHostByName"
-        | "WSAAsyncGetHostByAddr" | "WSACancelAsyncRequest" | "WSASetBlockingHook"
-        | "WSAUnhookBlockingHook" | "WSACancelBlockingCall" | "WSAIsBlocking" => {
-            wsock32_stub_zero as *const ()
-        }
+        "#101"
+        | "#102"
+        | "#103"
+        | "#104"
+        | "#105"
+        | "#106"
+        | "#107"
+        | "#108"
+        | "#109"
+        | "#110"
+        | "WSAAsyncSelect"
+        | "WSAAsyncGetHostByName"
+        | "WSAAsyncGetHostByAddr"
+        | "WSACancelAsyncRequest"
+        | "WSASetBlockingHook"
+        | "WSAUnhookBlockingHook"
+        | "WSACancelBlockingCall"
+        | "WSAIsBlocking" => wsock32_stub_zero as *const (),
         _ => return crate::ws2_32::resolve(function),
     };
     Some(p as u64)

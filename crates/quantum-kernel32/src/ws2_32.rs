@@ -103,26 +103,26 @@ fn wsa_from_errno(e: i32) -> i32 {
     match e {
         0 => 0,
         // Common subset — Darwin errno on the left, WSA on the right.
-        9 => 10038,    // EBADF -> WSAENOTSOCK
-        13 => 10013,   // EACCES -> WSAEACCES
-        22 => 10022,   // EINVAL -> WSAEINVAL
-        35 => 10035,   // EAGAIN/EWOULDBLOCK -> WSAEWOULDBLOCK
-        36 => 10036,   // EINPROGRESS -> WSAEINPROGRESS
-        47 => 10047,   // EAFNOSUPPORT -> WSAEAFNOSUPPORT
-        48 => 10048,   // EADDRINUSE -> WSAEADDRINUSE
-        49 => 10049,   // EADDRNOTAVAIL -> WSAEADDRNOTAVAIL
-        50 => 10050,   // ENETDOWN -> WSAENETDOWN
-        51 => 10051,   // ENETUNREACH -> WSAENETUNREACH
-        52 => 10052,   // ENETRESET -> WSAENETRESET
-        53 => 10053,   // ECONNABORTED -> WSAECONNABORTED
-        54 => 10054,   // ECONNRESET -> WSAECONNRESET
-        55 => 10055,   // ENOBUFS -> WSAENOBUFS
-        56 => 10056,   // EISCONN -> WSAEISCONN
-        57 => 10057,   // ENOTCONN -> WSAENOTCONN
-        60 => 10060,   // ETIMEDOUT -> WSAETIMEDOUT
-        61 => 10061,   // ECONNREFUSED -> WSAECONNREFUSED
-        64 => 10064,   // EHOSTDOWN -> WSAEHOSTDOWN
-        65 => 10065,   // EHOSTUNREACH -> WSAEHOSTUNREACH
+        9 => 10038,  // EBADF -> WSAENOTSOCK
+        13 => 10013, // EACCES -> WSAEACCES
+        22 => 10022, // EINVAL -> WSAEINVAL
+        35 => 10035, // EAGAIN/EWOULDBLOCK -> WSAEWOULDBLOCK
+        36 => 10036, // EINPROGRESS -> WSAEINPROGRESS
+        47 => 10047, // EAFNOSUPPORT -> WSAEAFNOSUPPORT
+        48 => 10048, // EADDRINUSE -> WSAEADDRINUSE
+        49 => 10049, // EADDRNOTAVAIL -> WSAEADDRNOTAVAIL
+        50 => 10050, // ENETDOWN -> WSAENETDOWN
+        51 => 10051, // ENETUNREACH -> WSAENETUNREACH
+        52 => 10052, // ENETRESET -> WSAENETRESET
+        53 => 10053, // ECONNABORTED -> WSAECONNABORTED
+        54 => 10054, // ECONNRESET -> WSAECONNRESET
+        55 => 10055, // ENOBUFS -> WSAENOBUFS
+        56 => 10056, // EISCONN -> WSAEISCONN
+        57 => 10057, // ENOTCONN -> WSAENOTCONN
+        60 => 10060, // ETIMEDOUT -> WSAETIMEDOUT
+        61 => 10061, // ECONNREFUSED -> WSAECONNREFUSED
+        64 => 10064, // EHOSTDOWN -> WSAEHOSTDOWN
+        65 => 10065, // EHOSTUNREACH -> WSAEHOSTUNREACH
         other => 10000 + other,
     }
 }
@@ -351,13 +351,7 @@ pub extern "C" fn getpeername(s: usize, addr: *mut c_void, len: *mut i32) -> i32
     }
 }
 
-pub extern "C" fn getsockopt(
-    s: usize,
-    level: i32,
-    name: i32,
-    val: *mut u8,
-    len: *mut i32,
-) -> i32 {
+pub extern "C" fn getsockopt(s: usize, level: i32, name: i32, val: *mut u8, len: *mut i32) -> i32 {
     let mut native_len: u32 = if !len.is_null() {
         unsafe { *len as u32 }
     } else {
@@ -531,12 +525,7 @@ pub extern "C" fn inet_pton(af: i32, src: *const i8, dst: *mut c_void) -> i32 {
     unsafe { inet_pton(af, src, dst) }
 }
 
-pub extern "C" fn inet_ntop(
-    af: i32,
-    src: *const c_void,
-    dst: *mut i8,
-    size: usize,
-) -> *const i8 {
+pub extern "C" fn inet_ntop(af: i32, src: *const c_void, dst: *mut i8, size: usize) -> *const i8 {
     unsafe extern "C" {
         fn inet_ntop(af: i32, src: *const c_void, dst: *mut i8, size: u32) -> *const i8;
     }
@@ -607,8 +596,7 @@ pub extern "C" fn getnameinfo(
             flags: i32,
         ) -> i32;
     }
-    let r =
-        unsafe { getnameinfo(addr, addr_len as u32, host, host_len, serv, serv_len, flags) };
+    let r = unsafe { getnameinfo(addr, addr_len as u32, host, host_len, serv, serv_len, flags) };
     if r != 0 {
         set_last_error_from_errno();
     }

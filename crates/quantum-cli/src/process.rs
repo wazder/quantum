@@ -244,9 +244,7 @@ fn wire_side_module_iats(side_modules: &mut [SideModule], trace: bool) {
                 return None;
             }
             if trace {
-                unresolved
-                    .borrow_mut()
-                    .push(format!("{dll}!{function}"));
+                unresolved.borrow_mut().push(format!("{dll}!{function}"));
             }
             None
         };
@@ -447,8 +445,7 @@ impl ThreadSpawner for CliThreadSpawner {
                 let stack = match GuestStack::default_size() {
                     Ok(s) => s,
                     Err(_) => {
-                        finished_for_worker
-                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                        finished_for_worker.store(true, std::sync::atomic::Ordering::SeqCst);
                         return;
                     }
                 };

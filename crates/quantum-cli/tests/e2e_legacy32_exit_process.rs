@@ -177,9 +177,8 @@ fn pe32_calls_exit_process_42() {
                     .rva_to_slice(rva, win.min(image.len() - rva as usize))
                     .expect("rva")
                     .to_vec();
-                let block =
-                    block::translate_for_dispatcher(&bytes, current, IsaMode::Legacy32)
-                        .expect("translate legacy32");
+                let block = block::translate_for_dispatcher(&bytes, current, IsaMode::Legacy32)
+                    .expect("translate legacy32");
                 disp.install(current, &block.host_bytes).expect("install")
             };
             let next = unsafe { invoke_block_with_ctx(ptr, &mut ctx) };

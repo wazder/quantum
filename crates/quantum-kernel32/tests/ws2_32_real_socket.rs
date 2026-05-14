@@ -5,8 +5,8 @@
 
 use core::ffi::c_void;
 use quantum_kernel32::ws2_32::{
-    accept, bind, closesocket, connect, getsockname, htons, listen, recv, send, socket,
-    WSAGetLastError,
+    WSAGetLastError, accept, bind, closesocket, connect, getsockname, htons, listen, recv, send,
+    socket,
 };
 
 const AF_INET: i32 = 2;
@@ -102,12 +102,12 @@ fn tcp_loopback_roundtrip() {
         zero: [0; 8],
     };
     let mut peer_len: i32 = core::mem::size_of::<WinSockAddrIn>() as i32;
-    let conn = accept(
-        listener,
-        &mut peer as *mut _ as *mut c_void,
-        &mut peer_len,
+    let conn = accept(listener, &mut peer as *mut _ as *mut c_void, &mut peer_len);
+    assert!(
+        conn != INVALID_SOCKET,
+        "accept failed err={}",
+        WSAGetLastError()
     );
-    assert!(conn != INVALID_SOCKET, "accept failed err={}", WSAGetLastError());
 
     let mut buf = [0u8; 8];
     let n = recv(conn, buf.as_mut_ptr(), buf.len() as i32, 0);

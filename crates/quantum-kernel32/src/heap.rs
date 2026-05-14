@@ -112,11 +112,7 @@ pub extern "C" fn HeapFree(handle: usize, _flags: u32, ptr: *mut u8) -> i32 {
 /// touching the same arena. That's lossy but acceptable for now;
 /// games rarely depend on heap isolation.
 #[unsafe(no_mangle)]
-pub extern "C" fn HeapCreate(
-    _options: u32,
-    _initial_size: usize,
-    _maximum_size: usize,
-) -> usize {
+pub extern "C" fn HeapCreate(_options: u32, _initial_size: usize, _maximum_size: usize) -> usize {
     DEFAULT_HEAP_HANDLE
 }
 
@@ -131,12 +127,7 @@ pub extern "C" fn HeapDestroy(_handle: usize) -> i32 {
 /// block and (since we have no size metadata) copy a conservative
 /// amount. Good enough for CRT scratch buffers.
 #[unsafe(no_mangle)]
-pub extern "C" fn HeapReAlloc(
-    handle: usize,
-    flags: u32,
-    ptr: *mut u8,
-    size: usize,
-) -> *mut u8 {
+pub extern "C" fn HeapReAlloc(handle: usize, flags: u32, ptr: *mut u8, size: usize) -> *mut u8 {
     if handle != DEFAULT_HEAP_HANDLE {
         return core::ptr::null_mut();
     }

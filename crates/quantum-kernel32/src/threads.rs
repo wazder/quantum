@@ -405,11 +405,7 @@ mod tests {
 
         struct TestSpawner;
         impl quantum_runtime::ThreadSpawner for TestSpawner {
-            fn spawn(
-                &self,
-                start_rip: u64,
-                param: u64,
-            ) -> Option<quantum_runtime::ThreadFinished> {
+            fn spawn(&self, start_rip: u64, param: u64) -> Option<quantum_runtime::ThreadFinished> {
                 GOT_RIP.store(start_rip, Ordering::SeqCst);
                 GOT_PARAM.store(param, Ordering::SeqCst);
                 Some(Arc::new(AtomicBool::new(true)))
@@ -453,8 +449,7 @@ mod tests {
                 _start_rip: u64,
                 _param: u64,
             ) -> Option<quantum_runtime::ThreadFinished> {
-                let finished: quantum_runtime::ThreadFinished =
-                    Arc::new(AtomicBool::new(false));
+                let finished: quantum_runtime::ThreadFinished = Arc::new(AtomicBool::new(false));
                 let f2 = Arc::clone(&finished);
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(25));
