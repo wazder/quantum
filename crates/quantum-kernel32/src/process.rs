@@ -75,13 +75,16 @@ impl Default for ExitState {
 }
 
 /// pthread-key handle for `ExitState`. Initialised lazily on first
-/// access; -1 means "not yet initialised".
-static EXIT_KEY: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-1);
+/// access; `u64::MAX` means "not yet initialised". Darwin `pthread_key_t`
+/// is `unsigned long` (8 bytes on arm64), so we keep the storage 64-bit
+/// wide; mis-declaring this as `u32` causes pthread_key_create to
+/// scribble past the local and corrupt the caller's stack frame.
+static EXIT_KEY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
 
 unsafe extern "C" {
-    fn pthread_key_create(key: *mut u32, destructor: *const ()) -> i32;
-    fn pthread_getspecific(key: u32) -> *mut core::ffi::c_void;
-    fn pthread_setspecific(key: u32, val: *const core::ffi::c_void) -> i32;
+    fn pthread_key_create(key: *mut u64, destructor: *const ()) -> i32;
+    fn pthread_getspecific(key: u64) -> *mut core::ffi::c_void;
+    fn pthread_setspecific(key: u64, val: *const core::ffi::c_void) -> i32;
 }
 
 /// One-time creation of the pthread key. We deliberately leak the key
@@ -89,21 +92,21 @@ unsafe extern "C" {
 /// resource. The destructor is null because each thread's box is owned
 /// by the runtime and shouldn't be auto-freed when the thread exits;
 /// any cleanup happens explicitly in the worker bootstrap.
-fn ensure_exit_key() -> u32 {
+fn ensure_exit_key() -> u64 {
     let cur = EXIT_KEY.load(Ordering::SeqCst);
-    if cur >= 0 {
-        return cur as u32;
+    if cur != u64::MAX {
+        return cur;
     }
-    let mut k: u32 = 0;
-    // SAFETY: writes into our local stack u32.
+    let mut k: u64 = 0;
+    // SAFETY: writes into our local stack u64 (Darwin pthread_key_t).
     unsafe {
         pthread_key_create(&mut k, core::ptr::null());
     }
-    match EXIT_KEY.compare_exchange(-1, k as i32, Ordering::SeqCst, Ordering::SeqCst) {
+    match EXIT_KEY.compare_exchange(u64::MAX, k, Ordering::SeqCst, Ordering::SeqCst) {
         Ok(_) => k,
         // A racing thread already installed a key. We leak `k` (small)
         // and use the winner's value.
-        Err(existing) => existing as u32,
+        Err(existing) => existing,
     }
 }
 
@@ -122,6 +125,21 @@ fn current_exit_state() -> &'static ExitState {
         let boxed = Box::into_raw(Box::new(ExitState::new()));
         pthread_setspecific(key, boxed as *const _);
         &*boxed
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn pthread_key_round_trip() {
+        let key = ensure_exit_key();
+        assert_ne!(key, u64::MAX, "key must be initialised");
+        let st = current_exit_state();
+        let p1 = st as *const ExitState as usize;
+        let p2 = current_exit_state() as *const ExitState as usize;
+        assert_eq!(p1, p2, "current_exit_state must be stable per thread");
     }
 }
 
@@ -330,8 +348,8 @@ extern "C" fn crash_handler(sig: i32, info: *mut DarwinSigInfo, ucontext: *mut c
     // pthread_getspecific is async-signal-safe per POSIX, so it's OK
     // to fetch this thread's ExitState from inside the handler.
     let key = EXIT_KEY.load(Ordering::SeqCst);
-    if key >= 0 {
-        let p = unsafe { pthread_getspecific(key as u32) } as *const ExitState;
+    if key != u64::MAX {
+        let p = unsafe { pthread_getspecific(key) } as *const ExitState;
         if !p.is_null() {
             let st = unsafe { &*p };
             st.code.store(0xFFFF_FFFE, Ordering::SeqCst);
