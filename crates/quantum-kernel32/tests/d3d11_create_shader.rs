@@ -14,6 +14,7 @@ const S_OK: i32 = 0;
 const VS_SLOT: usize = 12;
 const PS_SLOT: usize = 15;
 const CREATE_BUFFER_SLOT: usize = 3;
+const CREATE_TEXTURE_2D_SLOT: usize = 5;
 
 /// Layout of our Device + Vtbl (must mirror d3d11.rs). We don't import
 /// the private structs — we read the first qword of the Device pointer
@@ -207,6 +208,132 @@ fn create_buffer_allocates_metal_buffer_and_returns_handle() {
     // for [buf contents]); the round-trip is exercised in the cocoa
     // module's metal_new_buffer behaviour.
     quantum_kernel32::cocoa::release(buffer);
+}
+
+#[repr(C)]
+struct D3D11Texture2DDesc {
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    array_size: u32,
+    format: u32,
+    sample_count: u32,
+    sample_quality: u32,
+    usage: u32,
+    bind_flags: u32,
+    cpu_access_flags: u32,
+    misc_flags: u32,
+}
+
+#[test]
+fn create_texture_2d_allocates_metal_texture() {
+    if !quantum_kernel32::cocoa::metal_available() {
+        return;
+    }
+    let mut device: *mut c_void = core::ptr::null_mut();
+    let mut feature_level: u32 = 0;
+    let mut ctx: *mut c_void = core::ptr::null_mut();
+    let _ = quantum_kernel32::d3d11::D3D11CreateDevice(
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null(),
+        0,
+        0,
+        &mut device,
+        &mut feature_level,
+        &mut ctx,
+    );
+
+    let create_tex_addr = unsafe { vtbl_slot(device, CREATE_TEXTURE_2D_SLOT) };
+    type CreateTex = unsafe extern "C" fn(
+        *mut c_void,
+        *const c_void,
+        *const c_void,
+        *mut *mut c_void,
+    ) -> i32;
+    let create_tex: CreateTex = unsafe { core::mem::transmute(create_tex_addr) };
+
+    let desc = D3D11Texture2DDesc {
+        width: 256,
+        height: 256,
+        mip_levels: 1,
+        array_size: 1,
+        format: 28, // DXGI_FORMAT_R8G8B8A8_UNORM
+        sample_count: 1,
+        sample_quality: 0,
+        usage: 0,
+        bind_flags: 0x08, // D3D11_BIND_SHADER_RESOURCE
+        cpu_access_flags: 0,
+        misc_flags: 0,
+    };
+    let mut tex: *mut c_void = core::ptr::null_mut();
+    let hr = unsafe {
+        create_tex(
+            device,
+            &desc as *const _ as *const c_void,
+            core::ptr::null(),
+            &mut tex,
+        )
+    };
+    assert_eq!(hr, S_OK);
+    assert!(!tex.is_null());
+    quantum_kernel32::cocoa::release(tex);
+}
+
+#[test]
+fn create_texture_2d_rejects_zero_dimensions() {
+    if !quantum_kernel32::cocoa::metal_available() {
+        return;
+    }
+    let mut device: *mut c_void = core::ptr::null_mut();
+    let mut feature_level: u32 = 0;
+    let mut ctx: *mut c_void = core::ptr::null_mut();
+    let _ = quantum_kernel32::d3d11::D3D11CreateDevice(
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null(),
+        0,
+        0,
+        &mut device,
+        &mut feature_level,
+        &mut ctx,
+    );
+    let create_tex_addr = unsafe { vtbl_slot(device, CREATE_TEXTURE_2D_SLOT) };
+    type CreateTex = unsafe extern "C" fn(
+        *mut c_void,
+        *const c_void,
+        *const c_void,
+        *mut *mut c_void,
+    ) -> i32;
+    let create_tex: CreateTex = unsafe { core::mem::transmute(create_tex_addr) };
+    let desc = D3D11Texture2DDesc {
+        width: 0,
+        height: 0,
+        mip_levels: 1,
+        array_size: 1,
+        format: 28,
+        sample_count: 1,
+        sample_quality: 0,
+        usage: 0,
+        bind_flags: 0x08,
+        cpu_access_flags: 0,
+        misc_flags: 0,
+    };
+    let mut tex: *mut c_void = core::ptr::null_mut();
+    let hr = unsafe {
+        create_tex(
+            device,
+            &desc as *const _ as *const c_void,
+            core::ptr::null(),
+            &mut tex,
+        )
+    };
+    assert_ne!(hr, S_OK);
+    assert!(tex.is_null());
 }
 
 #[test]

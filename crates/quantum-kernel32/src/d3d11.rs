@@ -97,10 +97,120 @@ unsafe impl Sync for DeviceVtbl {}
 
 /// ID3D11Device::CreateBuffer vtable slot — per `<d3d11.h>`.
 const D3D11_DEVICE_CREATE_BUFFER_SLOT: usize = 3;
+/// ID3D11Device::CreateTexture2D vtable slot.
+const D3D11_DEVICE_CREATE_TEXTURE_2D_SLOT: usize = 5;
 /// ID3D11Device::CreateVertexShader vtable slot.
 const D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT: usize = 12;
 /// ID3D11Device::CreatePixelShader vtable slot.
 const D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT: usize = 15;
+
+/// D3D11_TEXTURE2D_DESC layout — 44 bytes. Several fields here are
+/// 32-bit unsigned; we only consume the ones we map.
+#[repr(C)]
+struct Texture2DDesc {
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    array_size: u32,
+    format: u32,
+    sample_count: u32,   // packed DXGI_SAMPLE_DESC.Count
+    sample_quality: u32, // packed DXGI_SAMPLE_DESC.Quality
+    usage: u32,
+    bind_flags: u32,
+    cpu_access_flags: u32,
+    misc_flags: u32,
+}
+
+/// Map a `DXGI_FORMAT` value to an `MTLPixelFormat`. Returns the Metal
+/// enum value the cocoa layer expects. The handful of formats covered
+/// here are the ones the SDK samples + most indie games use; the rest
+/// fall through to BGRA8Unorm as a safe-ish default.
+fn dxgi_to_metal_format(dxgi: u32) -> u64 {
+    match dxgi {
+        // DXGI_FORMAT_R8G8B8A8_UNORM → MTLPixelFormatRGBA8Unorm
+        28 => 70,
+        // DXGI_FORMAT_R8G8B8A8_UNORM_SRGB → MTLPixelFormatRGBA8Unorm_sRGB
+        29 => 71,
+        // DXGI_FORMAT_B8G8R8A8_UNORM → MTLPixelFormatBGRA8Unorm
+        87 => 80,
+        // DXGI_FORMAT_B8G8R8A8_UNORM_SRGB → MTLPixelFormatBGRA8Unorm_sRGB
+        91 => 81,
+        // DXGI_FORMAT_R32_FLOAT → MTLPixelFormatR32Float
+        41 => 53,
+        // DXGI_FORMAT_R16G16B16A16_FLOAT → MTLPixelFormatRGBA16Float
+        10 => 115,
+        // DXGI_FORMAT_D24_UNORM_S8_UINT → MTLPixelFormatDepth24Unorm_Stencil8 (255)
+        45 => 255,
+        // DXGI_FORMAT_D32_FLOAT → MTLPixelFormatDepth32Float
+        40 => 252,
+        _ => 80, // BGRA8Unorm safe default
+    }
+}
+
+/// Translate `D3D11_BIND_FLAG` to `MTLTextureUsage`. DX11 bind flags
+/// are a bitmask; we OR the equivalents.
+///   D3D11_BIND_SHADER_RESOURCE = 0x08 → MTLTextureUsageShaderRead = 0x01
+///   D3D11_BIND_RENDER_TARGET   = 0x20 → MTLTextureUsageRenderTarget = 0x04
+///   D3D11_BIND_UNORDERED_ACCESS= 0x80 → MTLTextureUsageShaderWrite = 0x02
+///   D3D11_BIND_DEPTH_STENCIL   = 0x40 → MTLTextureUsageRenderTarget = 0x04
+fn bind_flags_to_metal_usage(bind_flags: u32) -> u64 {
+    let mut u = 0u64;
+    if bind_flags & 0x08 != 0 {
+        u |= 0x01;
+    }
+    if bind_flags & 0x80 != 0 {
+        u |= 0x02;
+    }
+    if bind_flags & 0x20 != 0 {
+        u |= 0x04;
+    }
+    if bind_flags & 0x40 != 0 {
+        u |= 0x04;
+    }
+    if u == 0 {
+        u = 0x01; // default to shader-read so the texture is still usable
+    }
+    u
+}
+
+/// `HRESULT ID3D11Device::CreateTexture2D(const D3D11_TEXTURE2D_DESC*,
+///                                         const D3D11_SUBRESOURCE_DATA*,
+///                                         ID3D11Texture2D**)`
+extern "C" fn d3d11_create_texture_2d(
+    _this: *mut c_void,
+    p_desc: *const c_void,
+    _p_initial_data: *const c_void,
+    pp_tex: *mut *mut c_void,
+) -> i32 {
+    if p_desc.is_null() {
+        return E_NOTIMPL;
+    }
+    // SAFETY: caller (DX11 guest) is contractually required to pass a
+    // populated, properly-aligned descriptor.
+    let desc = unsafe { &*(p_desc as *const Texture2DDesc) };
+    if desc.width == 0 || desc.height == 0 {
+        return E_NOTIMPL;
+    }
+    let format = dxgi_to_metal_format(desc.format);
+    let usage = bind_flags_to_metal_usage(desc.bind_flags);
+    let tex = crate::cocoa::metal_new_texture_2d_with_usage(
+        desc.width,
+        desc.height,
+        format,
+        usage,
+    );
+    if tex.is_null() {
+        return E_NOTIMPL;
+    }
+    if !pp_tex.is_null() {
+        unsafe {
+            *pp_tex = tex;
+        }
+    } else {
+        crate::cocoa::release(tex);
+    }
+    S_OK
+}
 
 /// D3D11_BUFFER_DESC layout — exactly 6 × u32 = 24 bytes.
 #[repr(C)]
@@ -265,6 +375,8 @@ fn device_vtbl() -> &'static DeviceVtbl {
         slots[2] = d3d11_release as *const () as usize;
         slots[D3D11_DEVICE_CREATE_BUFFER_SLOT] =
             d3d11_create_buffer as *const () as usize;
+        slots[D3D11_DEVICE_CREATE_TEXTURE_2D_SLOT] =
+            d3d11_create_texture_2d as *const () as usize;
         slots[D3D11_DEVICE_CREATE_VERTEX_SHADER_SLOT] =
             d3d11_create_vertex_shader as *const () as usize;
         slots[D3D11_DEVICE_CREATE_PIXEL_SHADER_SLOT] =

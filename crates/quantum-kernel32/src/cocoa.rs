@@ -498,6 +498,107 @@ pub fn release(obj: *mut c_void) {
     msg_send_void(obj, sel("release\0"));
 }
 
+/// Allocate an `MTLTexture` with a 2D-shaped descriptor. `pixel_format`
+/// is an `MTLPixelFormat` enum value (see d3d11 mapping below), `width`
+/// and `height` are pixels. Returns a retained `id<MTLTexture>` or
+/// null. The texture is set up for shader read access by default.
+pub fn metal_new_texture_2d(width: u32, height: u32, pixel_format: u64) -> *mut c_void {
+    if width == 0 || height == 0 {
+        return core::ptr::null_mut();
+    }
+    let device = metal_default_device();
+    if device.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Build a MTLTextureDescriptor via the convenience constructor.
+    //   [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+    //                                 width:w
+    //                                 height:h
+    //                                 mipmapped:NO]
+    let desc_cls = class_named("MTLTextureDescriptor\0");
+    if desc_cls.is_null() {
+        return core::ptr::null_mut();
+    }
+    let sel_make = sel(
+        "texture2DDescriptorWithPixelFormat:width:height:mipmapped:\0",
+    );
+    type FMake = unsafe extern "C" fn(Object, Sel, u64, usize, usize, bool) -> Object;
+    let fmake: FMake = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    let desc = unsafe {
+        fmake(
+            desc_cls,
+            sel_make,
+            pixel_format,
+            width as usize,
+            height as usize,
+            false,
+        )
+    };
+    if desc.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Default usage = ShaderRead (1). Render targets bump this; we let
+    // the d3d11 layer override via metal_new_texture_2d_with_usage.
+    let sel_new_tex = sel("newTextureWithDescriptor:\0");
+    msg_send_obj1(device, sel_new_tex, desc)
+}
+
+/// One-call variant for callers that have figured out an MTLTextureUsage
+/// mask separately (e.g. the d3d11 layer's bind-flags translation).
+pub fn metal_new_texture_2d_with_usage(
+    width: u32,
+    height: u32,
+    pixel_format: u64,
+    usage_mask: u64,
+) -> *mut c_void {
+    if width == 0 || height == 0 {
+        return core::ptr::null_mut();
+    }
+    let device = metal_default_device();
+    if device.is_null() {
+        return core::ptr::null_mut();
+    }
+    let desc_cls = class_named("MTLTextureDescriptor\0");
+    if desc_cls.is_null() {
+        return core::ptr::null_mut();
+    }
+    let sel_make = sel(
+        "texture2DDescriptorWithPixelFormat:width:height:mipmapped:\0",
+    );
+    type FMake = unsafe extern "C" fn(Object, Sel, u64, usize, usize, bool) -> Object;
+    let fmake: FMake = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    let desc = unsafe {
+        fmake(
+            desc_cls,
+            sel_make,
+            pixel_format,
+            width as usize,
+            height as usize,
+            false,
+        )
+    };
+    if desc.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Override usage on the descriptor.
+    type FUsage = unsafe extern "C" fn(Object, Sel, u64);
+    let fusage: FUsage = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe {
+        fusage(desc, sel("setUsage:\0"), usage_mask);
+    }
+    let sel_new_tex = sel("newTextureWithDescriptor:\0");
+    msg_send_obj1(device, sel_new_tex, desc)
+}
+
+/// Helper to issue `obj1: a0` style messages where the result is an
+/// object. Kept private; the public API uses
+/// `metal_new_texture_2d` etc.
+fn msg_send_obj1(receiver: Object, sel: Sel, a0: Object) -> Object {
+    type F = unsafe extern "C" fn(Object, Sel, Object) -> Object;
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe { f(receiver, sel, a0) }
+}
+
 /// NSEvent kind. Values from `<AppKit/NSEvent.h>` (NSEventType enum).
 ///
 /// # Safety
