@@ -380,6 +380,234 @@ pub mod opcode {
     pub const USHR: u16 = 0x55;
     pub const UTOF: u16 = 0x56;
     pub const XOR: u16 = 0x57;
+    /// Vertex shader output register declaration.
+    pub const DCL_OUTPUT: u16 = 0x65;
+    /// Pixel shader input register declaration.
+    pub const DCL_INPUT_PS: u16 = 0x62;
+}
+
+// ---------- Operand decoder ----------
+//
+// Each operand starts with a 32-bit "operand token":
+//   bits 0..1   number of components (0=0, 1=1, 2=4, 3=N)
+//   bits 2..3   component selection mode (mask / swizzle / select-1)
+//   bits 4..7   component values (mask/swizzle/select index)
+//   bits 8..11  operand type (0=temp, 1=input, 2=output, 4=imm32, ...)
+//   bits 12..19 index dimension (0=scalar, 1=1D, 2=2D, 3=3D) + per-dim
+//               representation (immediate vs relative)
+//   bits 20..30 reserved
+//   bit  31     extended
+//
+// We decode the subset we need for vertex / pixel shader MOVs: temp,
+// input, output, immediate. Other types (constant buffer, sampler,
+// resource, ...) get reported as `OperandType::Unknown(raw)` so the
+// emitter can pick them up later without re-walking the bytes.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandType {
+    Temp,
+    Input,
+    Output,
+    IndexableTemp,
+    Immediate32,
+    ConstantBuffer,
+    Sampler,
+    Resource,
+    NullObject,
+    Unknown(u8),
+}
+
+impl OperandType {
+    fn from_raw(v: u8) -> Self {
+        match v {
+            0 => Self::Temp,
+            1 => Self::Input,
+            2 => Self::Output,
+            3 => Self::IndexableTemp,
+            4 => Self::Immediate32,
+            8 => Self::ConstantBuffer,
+            6 => Self::Sampler,
+            7 => Self::Resource,
+            13 => Self::NullObject,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// Component selection / masking. A swizzle/mask is four 2-bit
+/// values picking among `xyzw` (0..3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentSelect {
+    /// All four components present (operand has 0 components — scalar).
+    None,
+    /// A 4-bit mask of which `xyzw` are written.
+    Mask(u8),
+    /// A 4-element swizzle (`[xyzw, xyzw, xyzw, xyzw]`).
+    Swizzle([u8; 4]),
+    /// A single-component select (one of `xyzw`).
+    Select1(u8),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Operand {
+    pub op_type: OperandType,
+    pub selection: ComponentSelect,
+    /// For Temp/Input/Output/IndexableTemp: the register index. For
+    /// Immediate32: the first immediate word. For unknown / extended
+    /// forms: 0.
+    pub index0: u32,
+    /// Immediate operands carry up to four 32-bit lanes (vec4); only
+    /// `imm[..imm_len]` is valid.
+    pub imm: [u32; 4],
+    pub imm_len: u8,
+}
+
+/// Pull one operand out of `tokens` starting at `cursor`. Returns the
+/// decoded operand and the new cursor position. Returns None when the
+/// remaining tokens can't form a complete operand.
+pub fn decode_operand(tokens: &[u32], cursor: usize) -> Option<(Operand, usize)> {
+    let token = *tokens.get(cursor)?;
+    let mut next = cursor + 1;
+
+    let num_comp = (token & 0b11) as u8;
+    let sel_mode = ((token >> 2) & 0b11) as u8;
+    let sel_bits = ((token >> 4) & 0x0F) as u8;
+    let op_type_raw = ((token >> 12) & 0xFF) as u8;
+    let index_dim = ((token >> 20) & 0b11) as u8;
+    let extended = (token & 0x8000_0000) != 0;
+
+    // We accept and skip the extended-operand token but don't decode
+    // its sub-fields yet.
+    if extended {
+        let _ext = *tokens.get(next)?;
+        next += 1;
+    }
+
+    let selection = match (num_comp, sel_mode) {
+        (0, _) => ComponentSelect::None,
+        (1, _) => ComponentSelect::Select1(sel_bits),
+        (2, 0) => {
+            // Mask form: low 4 bits are the write mask.
+            ComponentSelect::Mask(sel_bits)
+        }
+        (2, 1) => {
+            // Swizzle form: sel_bits is two-bit per lane, 4 lanes packed.
+            let s = [
+                sel_bits & 0b11,
+                (sel_bits >> 2) & 0b11,
+                // Real swizzles use the full byte from bits 4..11.
+                ((token >> 6) & 0b11) as u8,
+                ((token >> 8) & 0b11) as u8,
+            ];
+            ComponentSelect::Swizzle(s)
+        }
+        (2, 2) => ComponentSelect::Select1(sel_bits),
+        _ => ComponentSelect::None,
+    };
+
+    let op_type = OperandType::from_raw(op_type_raw);
+
+    let mut index0: u32 = 0;
+    let mut imm = [0u32; 4];
+    let mut imm_len = 0u8;
+
+    if matches!(op_type, OperandType::Immediate32) {
+        // imm32 operand: one 32-bit word per component the operand
+        // declared (num_comp == 1 → 1 word; num_comp == 2 → 4 words).
+        let count = match num_comp {
+            1 => 1usize,
+            2 => 4usize,
+            _ => 0,
+        };
+        for slot in imm.iter_mut().take(count) {
+            *slot = *tokens.get(next)?;
+            next += 1;
+        }
+        imm_len = count as u8;
+        index0 = imm[0];
+    } else {
+        // For temp/input/output etc., index_dim tokens follow. We
+        // decode the simplest "1D immediate" form: one word giving the
+        // register index. Anything more complex (relative addressing,
+        // multi-dim indices) is recorded as 0 for now.
+        if index_dim >= 1 {
+            index0 = *tokens.get(next)?;
+            next += 1;
+        }
+        // Skip any additional dim tokens we don't decode yet.
+        for _ in 1..index_dim as usize {
+            next += 1;
+            if next > tokens.len() {
+                return None;
+            }
+        }
+    }
+
+    Some((
+        Operand {
+            op_type,
+            selection,
+            index0,
+            imm,
+            imm_len,
+        },
+        next,
+    ))
+}
+
+// ---------- Minimal MSL emitter ----------
+//
+// Emits Metal Shading Language source for the handful of DXBC opcodes
+// we want a real game's simplest shaders to compile through. The full
+// transpiler will route every opcode here; for now MOV / ADD / MUL /
+// MAD / RET cover passthrough VS and a trivial PS.
+
+/// Emit Metal Shading Language for `tokens` (the SHEX/SHDR token
+/// stream including its 2-token program header). Returns the MSL
+/// source as a `String` or a `DecodeError`.
+pub fn emit_msl(tokens: &[u32]) -> Result<String, DecodeError> {
+    let hdr = parse_program_header(tokens)?;
+    let mut out = String::new();
+    out.push_str("// generated by quantum-kernel32::dxbc::emit_msl\n");
+    out.push_str(&format!(
+        "// shader major={} minor={} type={:?}\n",
+        hdr.major, hdr.minor, hdr.program_type
+    ));
+    out.push_str("#include <metal_stdlib>\nusing namespace metal;\n\n");
+
+    // Emit a stub `kernel` for the time being — picking the right
+    // function attribute (`[[vertex]]` / `[[fragment]]`) and signature
+    // requires walking ISGN / OSGN, which is a follow-up.
+    out.push_str("kernel void main_shader() {\n");
+    out.push_str("    float4 r0 = float4(0);\n");
+
+    for inst in InstructionIter::new(tokens) {
+        let inst = inst?;
+        match inst.opcode {
+            opcode::MOV => {
+                out.push_str("    // MOV (body decoded in operand-decoder follow-up)\n");
+            }
+            opcode::ADD => {
+                out.push_str("    // ADD\n");
+            }
+            opcode::MUL => {
+                out.push_str("    // MUL\n");
+            }
+            opcode::MAD => {
+                out.push_str("    // MAD\n");
+            }
+            opcode::RET => {
+                // RET in DX is end-of-function; in MSL kernel that's
+                // an implicit return.
+                out.push_str("    return;\n");
+            }
+            other => {
+                out.push_str(&format!("    // unsupported opcode 0x{other:02X}\n"));
+            }
+        }
+    }
+    out.push_str("}\n");
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -570,5 +798,55 @@ mod tests {
 
         // Misaligned length is rejected.
         assert!(InstructionIter::from_payload_bytes(&[1, 2, 3]).is_none());
+    }
+
+    /// Build an operand token for `r<index>` with a write mask of `wxyz`.
+    fn op_temp_mask(_index: u32, mask: u8) -> u32 {
+        // num_comp=2 (4-comp), sel_mode=0 (mask), sel_bits=mask
+        // op_type=0 (temp), index_dim=1 (1D)
+        0b10 | ((mask as u32) << 4) | (1 << 20)
+    }
+
+    #[test]
+    fn decode_operand_handles_temp_register_with_mask() {
+        let op_tok = op_temp_mask(2, 0b1111);
+        let index_tok = 2u32;
+        let tokens = [op_tok, index_tok];
+        let (op, next) = decode_operand(&tokens, 0).unwrap();
+        assert_eq!(next, 2);
+        assert_eq!(op.op_type, OperandType::Temp);
+        assert_eq!(op.index0, 2);
+        match op.selection {
+            ComponentSelect::Mask(m) => assert_eq!(m, 0b1111),
+            other => panic!("expected Mask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_operand_handles_imm32_scalar() {
+        // num_comp=1 (one component), op_type=4 (Immediate32),
+        // index_dim=0 (scalar), one immediate word.
+        let op_tok: u32 = 1 | (4 << 12);
+        let tokens = [op_tok, 0x4080_0000]; // 4.0f
+        let (op, next) = decode_operand(&tokens, 0).unwrap();
+        assert_eq!(next, 2);
+        assert_eq!(op.op_type, OperandType::Immediate32);
+        assert_eq!(op.imm_len, 1);
+        assert_eq!(op.imm[0], 0x4080_0000);
+    }
+
+    #[test]
+    fn emit_msl_passthrough_ret_only_shader() {
+        // PS 4.0, total 4 tokens: 2-token header + RET (len=2).
+        let prog_type_ps: u32 = 0;
+        let major: u32 = 4;
+        let version_token = (major << 4) | (prog_type_ps << 16);
+        let total: u32 = 4;
+        let ret = (opcode::RET as u32) | (2u32 << 24);
+        let tokens = [version_token, total, ret, 0];
+        let msl = emit_msl(&tokens).unwrap();
+        assert!(msl.contains("metal_stdlib"));
+        assert!(msl.contains("kernel void main_shader"));
+        assert!(msl.contains("return;"));
     }
 }
