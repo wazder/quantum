@@ -116,13 +116,7 @@ pub unsafe fn register_class(name: *const u16, wnd_proc: WndProcPtr) -> u16 {
     }
     let atom = g.next_atom;
     g.next_atom = g.next_atom.wrapping_add(1).max(0xC000);
-    g.classes.insert(
-        name_str,
-        ClassEntry {
-            atom,
-            wnd_proc,
-        },
-    );
+    g.classes.insert(name_str, ClassEntry { atom, wnd_proc });
     atom
 }
 
@@ -253,7 +247,10 @@ mod tests {
         let a1 = unsafe { register_class(name.as_ptr(), 0x1000) };
         let a2 = unsafe { register_class(name.as_ptr(), 0x9999) };
         assert_eq!(a1, a2, "same class name must return the same atom");
-        assert!(a1 >= 0xC000, "atoms must be above the system-reserved range");
+        assert!(
+            a1 >= 0xC000,
+            "atoms must be above the system-reserved range"
+        );
     }
 
     #[test]

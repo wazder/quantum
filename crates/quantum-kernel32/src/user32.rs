@@ -410,11 +410,11 @@ fn pump_cocoa_event_into_queue(target_hwnd: Option<usize>) -> bool {
     // yet — just translate the event type so the guest's loop sees
     // traffic and pump_one_event drains the queue.
     let win_msg = match kind {
-        10 => 0x0100, // WM_KEYDOWN
-        11 => 0x0101, // WM_KEYUP
-        5 => 0x0200,  // WM_MOUSEMOVE
-        1 => 0x0201,  // WM_LBUTTONDOWN
-        2 => 0x0202,  // WM_LBUTTONUP
+        10 => 0x0100,     // WM_KEYDOWN
+        11 => 0x0101,     // WM_KEYUP
+        5 => 0x0200,      // WM_MOUSEMOVE
+        1 => 0x0201,      // WM_LBUTTONDOWN
+        2 => 0x0202,      // WM_LBUTTONUP
         _ => return true, // event consumed but not interesting
     };
     let dest = target_hwnd.unwrap_or(0);
@@ -627,6 +627,7 @@ pub fn resolve(function: &str) -> Option<u64> {
         "KillTimer" => KillTimer as *const (),
         "RegisterClassExW" => RegisterClassExW as *const (),
         "CreateWindowExW" => CreateWindowExW as *const (),
+        "DestroyWindow" => DestroyWindow as *const (),
         "DefWindowProcW" => DefWindowProcW as *const (),
         "PostMessageW" => PostMessageW as *const (),
         "SendMessageW" => SendMessageW as *const (),

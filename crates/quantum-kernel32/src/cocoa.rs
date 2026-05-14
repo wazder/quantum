@@ -287,7 +287,9 @@ pub fn create_window(width: i32, height: i32, title_wide: *const u16) -> *mut c_
             height: height as f64,
         },
     };
-    let style = NS_WINDOW_STYLE_MASK_TITLED | NS_WINDOW_STYLE_MASK_CLOSABLE | NS_WINDOW_STYLE_MASK_RESIZABLE;
+    let style = NS_WINDOW_STYLE_MASK_TITLED
+        | NS_WINDOW_STYLE_MASK_CLOSABLE
+        | NS_WINDOW_STYLE_MASK_RESIZABLE;
     let window = msg_send_obj_init_window(raw, init, rect, style, NS_BACKING_STORE_BUFFERED, false);
     if window.is_null() {
         return core::ptr::null_mut();
@@ -307,7 +309,11 @@ pub fn show_window(window: *mut c_void) {
     if window.is_null() {
         return;
     }
-    msg_send_void1(window, sel("makeKeyAndOrderFront:\0"), core::ptr::null_mut());
+    msg_send_void1(
+        window,
+        sel("makeKeyAndOrderFront:\0"),
+        core::ptr::null_mut(),
+    );
 }
 
 /// orderOut:nil — hide the window without releasing it.
@@ -337,7 +343,14 @@ pub fn pump_one_event() -> *mut c_void {
     let sel_next = sel("nextEventMatchingMask:untilDate:inMode:dequeue:\0");
     // untilDate: nil → don't block. inMode: NSDefaultRunLoopMode.
     let mode = nsstring_from_utf8(b"kCFRunLoopDefaultMode\0");
-    msg_send_next_event(app, sel_next, NS_EVENT_MASK_ANY, core::ptr::null_mut(), mode, true)
+    msg_send_next_event(
+        app,
+        sel_next,
+        NS_EVENT_MASK_ANY,
+        core::ptr::null_mut(),
+        mode,
+        true,
+    )
 }
 
 /// NSEvent kind. Values from `<AppKit/NSEvent.h>` (NSEventType enum).
@@ -381,7 +394,9 @@ mod tests {
             eprintln!("skipping (set QUANTUM_COCOA_TEST=1 to exercise main-thread path)");
             return;
         }
-        let title: [u16; 6] = ['q' as u16, 'u' as u16, 'a' as u16, 'n' as u16, 't' as u16, 0];
+        let title: [u16; 6] = [
+            'q' as u16, 'u' as u16, 'a' as u16, 'n' as u16, 't' as u16, 0,
+        ];
         let w = create_window(640, 480, title.as_ptr());
         assert!(!w.is_null(), "window pointer must be non-null");
     }
