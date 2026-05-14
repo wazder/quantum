@@ -46,11 +46,12 @@ pub extern "C" fn GetDC(_hwnd: usize) -> usize {
 
 // Window rect queries — return a 1920x1080 default size, origin (0,0).
 #[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Rect {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
 }
 
 #[unsafe(no_mangle)]
@@ -627,6 +628,144 @@ pub extern "C" fn GetUserObjectInformationW(
     1
 }
 
+/// `BOOL SystemParametersInfoW(UINT uiAction, UINT uiParam, PVOID pvParam, UINT fWinIni)`.
+/// Returns TRUE for every query we recognise; the buffers (work area,
+/// scroll lines, …) get filled with safe defaults.
+#[unsafe(no_mangle)]
+pub extern "C" fn SystemParametersInfoW(
+    ui_action: u32,
+    _ui_param: u32,
+    pv_param: *mut c_void,
+    _f_win_ini: u32,
+) -> i32 {
+    // SPI_GETWORKAREA = 0x0030 → fills a RECT with the work area
+    // (we use the same 1920×1080 default as GetSystemMetrics).
+    if ui_action == 0x0030 && !pv_param.is_null() {
+        unsafe {
+            *(pv_param as *mut Rect) = Rect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            };
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn SystemParametersInfoA(
+    ui_action: u32,
+    ui_param: u32,
+    pv_param: *mut c_void,
+    f_win_ini: u32,
+) -> i32 {
+    SystemParametersInfoW(ui_action, ui_param, pv_param, f_win_ini)
+}
+
+/// `HMONITOR MonitorFromWindow(HWND hwnd, DWORD dwFlags)` — return a
+/// fake monitor handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn MonitorFromWindow(_hwnd: usize, _flags: u32) -> usize {
+    0x4000_0000_0003_0001
+}
+
+/// `HMONITOR MonitorFromPoint(POINT pt, DWORD dwFlags)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn MonitorFromPoint(_pt: Point, _flags: u32) -> usize {
+    0x4000_0000_0003_0001
+}
+
+/// `MONITORINFOEXW` layout (104 bytes): cbSize + rcMonitor (Rect, 16B)
+/// + rcWork (Rect, 16B) + dwFlags (u32) + szDevice (CCHDEVICENAME=32 wchar).
+#[repr(C)]
+pub struct MonitorInfoExW {
+    pub cb_size: u32,
+    pub rc_monitor: Rect,
+    pub rc_work: Rect,
+    pub dw_flags: u32,
+    pub sz_device: [u16; 32],
+}
+
+/// `BOOL GetMonitorInfoW(HMONITOR hMonitor, LPMONITORINFO lpmi)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn GetMonitorInfoW(_h_monitor: usize, lpmi: *mut c_void) -> i32 {
+    if lpmi.is_null() {
+        return 0;
+    }
+    // First u32 is cbSize — we honour MONITORINFO (40 bytes) AND
+    // MONITORINFOEXW (104 bytes); for the larger variant we also fill
+    // the device-name slot.
+    unsafe {
+        let cb_size = *(lpmi as *const u32);
+        if cb_size as usize >= core::mem::size_of::<MonitorInfoExW>() {
+            let m = &mut *(lpmi as *mut MonitorInfoExW);
+            m.rc_monitor = Rect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            };
+            m.rc_work = m.rc_monitor;
+            m.dw_flags = 0x1; // MONITORINFOF_PRIMARY
+            for (i, c) in "\\\\.\\DISPLAY1\0".encode_utf16().enumerate() {
+                if i >= m.sz_device.len() {
+                    break;
+                }
+                m.sz_device[i] = c;
+            }
+        } else if cb_size >= 40 {
+            // MONITORINFO: cb_size + rcMonitor + rcWork + dwFlags.
+            let base = lpmi as *mut u32;
+            // Skip cb_size; write rcMonitor (4 i32) + rcWork (4 i32) + flags.
+            let rc_mon = base.add(1) as *mut Rect;
+            *rc_mon = Rect {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            };
+            let rc_work = base.add(5) as *mut Rect;
+            *rc_work = *rc_mon;
+            *base.add(9) = 1; // dwFlags
+        }
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn GetMonitorInfoA(h_monitor: usize, lpmi: *mut c_void) -> i32 {
+    GetMonitorInfoW(h_monitor, lpmi)
+}
+
+/// `BOOL EnumDisplayMonitors(HDC, LPCRECT, MONITORENUMPROC, LPARAM)`.
+/// We call the callback exactly once with the primary monitor.
+type MonitorEnumProc =
+    extern "C" fn(h_monitor: usize, h_dc: usize, rect: *mut Rect, lparam: usize) -> i32;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn EnumDisplayMonitors(
+    _hdc: usize,
+    _clip: *const Rect,
+    proc: *const MonitorEnumProc,
+    lparam: usize,
+) -> i32 {
+    if proc.is_null() {
+        return 0;
+    }
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    };
+    // SAFETY: caller obeys the Win32 contract — proc points at a real
+    // MONITORENUMPROC.
+    let f: MonitorEnumProc = unsafe { *proc };
+    let _ = f(0x4000_0000_0003_0001, 0, &mut rect, lparam);
+    1
+}
+
 pub fn resolve(function: &str) -> Option<u64> {
     let p: *const () = match function {
         "LoadCursorW" => LoadCursorW as *const (),
@@ -694,6 +833,13 @@ pub fn resolve(function: &str) -> Option<u64> {
         "GetWindowThreadProcessId" => GetWindowThreadProcessId as *const (),
         "EnumDisplayDevicesA" => EnumDisplayDevicesA as *const (),
         "EnumDisplayDevicesW" => EnumDisplayDevicesW as *const (),
+        "SystemParametersInfoA" => SystemParametersInfoA as *const (),
+        "SystemParametersInfoW" => SystemParametersInfoW as *const (),
+        "MonitorFromWindow" => MonitorFromWindow as *const (),
+        "MonitorFromPoint" => MonitorFromPoint as *const (),
+        "GetMonitorInfoA" => GetMonitorInfoA as *const (),
+        "GetMonitorInfoW" => GetMonitorInfoW as *const (),
+        "EnumDisplayMonitors" => EnumDisplayMonitors as *const (),
         "CharLowerBuffA" => CharLowerBuffA as *const (),
         "CharLowerBuffW" => CharLowerBuffW as *const (),
         "CharUpperBuffA" => CharUpperBuffA as *const (),
