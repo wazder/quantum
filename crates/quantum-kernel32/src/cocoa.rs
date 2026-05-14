@@ -32,11 +32,20 @@ type Class = *mut c_void;
 type Object = *mut c_void;
 type Sel = *mut c_void;
 
+// clippy::duplicated_attributes flags the three `kind = "framework"`
+// repetitions as a copy-paste mistake, but they're necessary — each
+// frame is its own linker input and rustc needs the full triple.
+#[allow(clippy::duplicated_attributes)]
 #[link(name = "objc")]
 #[link(name = "AppKit", kind = "framework")]
+#[link(name = "Metal", kind = "framework")]
+#[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {
     fn objc_getClass(name: *const u8) -> Class;
     fn sel_registerName(name: *const u8) -> Sel;
+    /// Returns a default MTLDevice* (autoreleased). Null when Metal is
+    /// not available (no GPU / no AppKit).
+    fn MTLCreateSystemDefaultDevice() -> *mut c_void;
 }
 
 /// `objc_msgSend` is variadic in C. Rust can't safely declare a variadic
@@ -353,6 +362,87 @@ pub fn pump_one_event() -> *mut c_void {
     )
 }
 
+// ---------- Metal bridge ----------
+
+/// Returns a default `MTLDevice*` (autoreleased), or null when Metal
+/// is unreachable. The pointer is owned by the autorelease pool.
+pub fn metal_default_device() -> *mut c_void {
+    // SAFETY: the FFI is just a function call returning a pointer.
+    unsafe { MTLCreateSystemDefaultDevice() }
+}
+
+/// True if Metal is reachable on this host (the default device exists).
+/// Cheap probe — callers can use this to gate Phase-4 rendering paths.
+pub fn metal_available() -> bool {
+    !metal_default_device().is_null()
+}
+
+/// Allocate and initialise a fresh `CAMetalLayer`, bind a default
+/// `MTLDevice` to it, and return the layer pointer. Returns null if
+/// either Metal or QuartzCore is unreachable.
+///
+/// The layer is *not* yet attached to a view — call `attach_metal_layer`
+/// to slot it into a window's contentView.
+pub fn create_metal_layer() -> *mut c_void {
+    let device = metal_default_device();
+    if device.is_null() {
+        return core::ptr::null_mut();
+    }
+    let cls = class_named("CAMetalLayer\0");
+    if cls.is_null() {
+        return core::ptr::null_mut();
+    }
+    let raw = msg_send_obj(cls, sel("alloc\0"));
+    if raw.is_null() {
+        return core::ptr::null_mut();
+    }
+    let layer = msg_send_obj(raw, sel("init\0"));
+    if layer.is_null() {
+        return core::ptr::null_mut();
+    }
+    // [layer setDevice:device]
+    msg_send_void1(layer, sel("setDevice:\0"), device);
+    // BGRA8Unorm = 80 — the default DXGI_FORMAT_R8G8B8A8_UNORM swap
+    // chain analogue. Set explicitly for predictability.
+    type FUInt = unsafe extern "C" fn(Object, Sel, u64);
+    let f: FUInt = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe {
+        f(layer, sel("setPixelFormat:\0"), 80);
+    }
+    layer
+}
+
+/// Attach an existing `CAMetalLayer` to the given `NSWindow`'s
+/// contentView (sets wantsLayer = YES and contentView.layer = layer).
+/// No-op when either pointer is null.
+pub fn attach_metal_layer(window: *mut c_void, layer: *mut c_void) {
+    if window.is_null() || layer.is_null() {
+        return;
+    }
+    let content = msg_send_obj(window, sel("contentView\0"));
+    if content.is_null() {
+        return;
+    }
+    // [content setWantsLayer:YES]
+    type FBool = unsafe extern "C" fn(Object, Sel, bool);
+    let fb: FBool = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe {
+        fb(content, sel("setWantsLayer:\0"), true);
+    }
+    // [content setLayer:layer]
+    msg_send_void1(content, sel("setLayer:\0"), layer);
+}
+
+/// Ask the layer for the next drawable (`CAMetalDrawable*`). Returns
+/// null when no drawable is available (which can happen if the layer
+/// hasn't been attached or the host is paging frames).
+pub fn next_drawable(layer: *mut c_void) -> *mut c_void {
+    if layer.is_null() {
+        return core::ptr::null_mut();
+    }
+    msg_send_obj(layer, sel("nextDrawable\0"))
+}
+
 /// NSEvent kind. Values from `<AppKit/NSEvent.h>` (NSEventType enum).
 ///
 /// # Safety
@@ -376,6 +466,22 @@ mod tests {
     fn nsapp_class_resolves() {
         // On a real macOS host AppKit is always present.
         assert!(appkit_available(), "AppKit must be linked");
+    }
+
+    #[test]
+    fn metal_default_device_is_reachable() {
+        // Real Apple Silicon hosts always have Metal. We don't actually
+        // poke the device here (would touch the GPU stack) — just verify
+        // the symbol resolves.
+        let _ = metal_available();
+    }
+
+    #[test]
+    fn cametallayer_class_resolves() {
+        assert!(
+            !class_named("CAMetalLayer\0").is_null(),
+            "CAMetalLayer must be linkable from QuartzCore"
+        );
     }
 
     #[test]
