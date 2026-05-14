@@ -7,6 +7,7 @@
 //! through the JIT call boundary back to the runner.
 
 pub mod advapi32;
+pub mod cocoa;
 pub mod d3d11;
 pub mod file_io;
 pub mod gdi32;
@@ -25,6 +26,7 @@ pub mod thunks;
 pub mod time;
 pub mod user32;
 pub mod vm;
+pub mod windows_state;
 pub mod winmm;
 pub mod ws2_32;
 

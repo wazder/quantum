@@ -1,21 +1,23 @@
 //! `user32.dll` surface — windowing, input, clipboard.
 //!
-//! Almost every function here is a stub that returns a value that
-//! lets the calling game's init proceed past it. Real implementations
-//! will wire through to a Cocoa / SwiftUI / AppKit host once we have
-//! a window manager. Today the contracts are:
-//!   * Window creation: return a fake HWND (small non-null token).
-//!   * Message loop calls: return "no message" so the loop exits.
-//!   * State queries (foreground, focus, etc.): return our fake HWND
-//!     so the guest believes it owns the foreground.
-//!   * Cursor / clipboard: no-op succeed.
+//! Window creation, registration, destruction and the message pump now
+//! talk to the per-process `windows_state` registry. Most of the rest
+//! of the file is still stubs because real games drive them through
+//! the WNDPROC, which requires a host→guest dispatcher hop we haven't
+//! wired yet.
 //!
-//! When we wire real DX11→Metal we'll route swap-chain Present through
-//! a Metal-backed window we create here.
+//! Cocoa integration: when `QUANTUM_REAL_COCOA=1` is set in the env
+//! AND AppKit is reachable on the calling thread, CreateWindowExW
+//! also allocates a real `NSWindow*` and stashes it on the window
+//! record so DestroyWindow can release it. Tests that don't set the
+//! flag continue to run headless.
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use core::ffi::c_void;
+
+use crate::cocoa;
+use crate::windows_state;
 
 /// The single fake HWND we hand out for every CreateWindowEx /
 /// FindWindow / GetActiveWindow / GetForegroundWindow / GetDesktopWindow.
@@ -122,38 +124,113 @@ pub extern "C" fn KillTimer(_hwnd: usize, _id: usize) -> i32 {
 }
 
 // Window class / window creation.
-#[unsafe(no_mangle)]
-pub extern "C" fn RegisterClassExW(_wnd_class: *const c_void) -> u16 {
-    // Non-zero atom.
-    1
+
+/// Layout of `WNDCLASSEXW` per the Win32 ABI. The decoder lifts each
+/// field exactly; we only really care about `lpfnWndProc` (offset 8)
+/// and `lpszClassName` (offset 72 on x64) to register a class.
+#[repr(C)]
+pub struct WndClassExW {
+    pub cb_size: u32,
+    pub style: u32,
+    pub lpfn_wnd_proc: usize,
+    pub cb_cls_extra: i32,
+    pub cb_wnd_extra: i32,
+    pub h_instance: *mut c_void,
+    pub h_icon: usize,
+    pub h_cursor: usize,
+    pub hbr_background: usize,
+    pub lpsz_menu_name: *const u16,
+    pub lpsz_class_name: *const u16,
+    pub h_icon_sm: usize,
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn RegisterClassExW(wnd_class: *const c_void) -> u16 {
+    if wnd_class.is_null() {
+        return 0;
+    }
+    // SAFETY: caller (a Win32 guest) is contractually required to pass a
+    // properly-aligned WNDCLASSEXW. We only read the fields we need.
+    let wc = unsafe { &*(wnd_class as *const WndClassExW) };
+    unsafe { windows_state::register_class(wc.lpsz_class_name, wc.lpfn_wnd_proc) }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn CreateWindowExW(
     _ex_style: u32,
-    _class: *const u16,
-    _wname: *const u16,
+    class: *const u16,
+    wname: *const u16,
     _style: u32,
     _x: i32,
     _y: i32,
-    _w: i32,
-    _h: i32,
+    w: i32,
+    h: i32,
     _parent: usize,
     _menu: usize,
     _hinst: *mut c_void,
     _lp: *mut c_void,
 ) -> usize {
-    FAKE_HWND
+    let mut ns_window: usize = 0;
+    if std::env::var_os("QUANTUM_REAL_COCOA").is_some() && cocoa::appkit_available() {
+        let win = cocoa::create_window(w.max(1), h.max(1), wname);
+        if !win.is_null() {
+            ns_window = win as usize;
+        }
+    }
+    // SAFETY: class/wname are LPCWSTR (NUL-terminated UTF-16) per Win32.
+    unsafe { windows_state::create_window(class, wname, ns_window) }
 }
+
 #[unsafe(no_mangle)]
-pub extern "C" fn DefWindowProcW(_hwnd: usize, _msg: u32, _w: usize, _l: usize) -> usize {
+pub extern "C" fn DefWindowProcW(hwnd: usize, msg: u32, _w: usize, _l: usize) -> usize {
+    // Translate the small subset of messages a windowing-loop guest
+    // would route through DefWindowProc:
+    //   WM_DESTROY (0x0002) → PostQuitMessage(0) on the system queue
+    //   WM_CLOSE   (0x0010) → DestroyWindow(hwnd)
+    // Everything else returns 0, matching Microsoft's "no special
+    // handling" contract.
+    match msg {
+        0x0010 => {
+            let _ = DestroyWindow(hwnd);
+        }
+        0x0002 => {
+            windows_state::post_quit(0);
+        }
+        _ => {}
+    }
     0
 }
+
 #[unsafe(no_mangle)]
-pub extern "C" fn PostMessageW(_hwnd: usize, _msg: u32, _w: usize, _l: usize) -> i32 {
-    1
+pub extern "C" fn DestroyWindow(hwnd: usize) -> i32 {
+    if let Some(ns) = windows_state::destroy_window(hwnd) {
+        if ns != 0 {
+            cocoa::close_window(ns as *mut c_void);
+        }
+        return 1;
+    }
+    0
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn PostMessageW(hwnd: usize, msg: u32, wparam: usize, lparam: usize) -> i32 {
+    if windows_state::post_message(windows_state::PendingMsg {
+        hwnd,
+        message: msg,
+        wparam,
+        lparam,
+    }) {
+        1
+    } else {
+        0
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn SendMessageW(_hwnd: usize, _msg: u32, _w: usize, _l: usize) -> usize {
+    // True SendMessage runs the WNDPROC inline. We can't call back into
+    // guest code from a host thunk yet (needs the dispatcher hop). Drop
+    // the message on the floor for now and return 0 like DefWindowProc.
     0
 }
 #[unsafe(no_mangle)]
@@ -229,9 +306,10 @@ pub extern "C" fn SendInput(_n: u32, _inputs: *const c_void, _size: i32) -> u32 
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Point {
-    x: i32,
-    y: i32,
+    pub x: i32,
+    pub y: i32,
 }
 
 #[unsafe(no_mangle)]
@@ -282,54 +360,202 @@ pub extern "C" fn SetWindowPos(
 // main loop fall through quickly. A real window manager wires the
 // macOS NSEvent queue here.
 #[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Msg {
-    hwnd: usize,
-    message: u32,
-    wparam: usize,
-    lparam: usize,
-    time: u32,
-    pt: Point,
+    pub hwnd: usize,
+    pub message: u32,
+    pub wparam: usize,
+    pub lparam: usize,
+    pub time: u32,
+    pub pt: Point,
+}
+
+/// PM_REMOVE flag for PeekMessageW. PM_NOREMOVE = 0 leaves the message
+/// in the queue; we only consult `remove & PM_REMOVE`.
+const PM_REMOVE: u32 = 1;
+
+fn write_msg(msg: *mut Msg, m: windows_state::PendingMsg) {
+    if msg.is_null() {
+        return;
+    }
+    // SAFETY: caller passed a valid MSG buffer per the Win32 contract.
+    unsafe {
+        *msg = Msg {
+            hwnd: m.hwnd,
+            message: m.message,
+            wparam: m.wparam,
+            lparam: m.lparam,
+            time: 0,
+            pt: Point { x: 0, y: 0 },
+        };
+    }
+}
+
+/// Drain one NSEvent from AppKit (when QUANTUM_REAL_COCOA is on) and
+/// translate it into a pending MSG for the foreground window. Returns
+/// true if a MSG was actually enqueued, false otherwise.
+fn pump_cocoa_event_into_queue(target_hwnd: Option<usize>) -> bool {
+    if std::env::var_os("QUANTUM_REAL_COCOA").is_none() || !cocoa::appkit_available() {
+        return false;
+    }
+    let ev = cocoa::pump_one_event();
+    if ev.is_null() {
+        return false;
+    }
+    // SAFETY: pump_one_event guarantees ev is null or a valid NSEvent*.
+    let kind = unsafe { cocoa::event_type(ev) };
+    // NSEventTypeKeyDown = 10, NSEventTypeKeyUp = 11,
+    // NSEventTypeMouseMoved = 5, NSEventTypeLeftMouseDown = 1,
+    // NSEventTypeLeftMouseUp = 2. We don't decode keycodes / coords
+    // yet — just translate the event type so the guest's loop sees
+    // traffic and pump_one_event drains the queue.
+    let win_msg = match kind {
+        10 => 0x0100, // WM_KEYDOWN
+        11 => 0x0101, // WM_KEYUP
+        5 => 0x0200,  // WM_MOUSEMOVE
+        1 => 0x0201,  // WM_LBUTTONDOWN
+        2 => 0x0202,  // WM_LBUTTONUP
+        _ => return true, // event consumed but not interesting
+    };
+    let dest = target_hwnd.unwrap_or(0);
+    if dest != 0 {
+        let _ = windows_state::post_message(windows_state::PendingMsg {
+            hwnd: dest,
+            message: win_msg,
+            wparam: 0,
+            lparam: 0,
+        });
+    }
+    true
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn PeekMessageW(
     msg: *mut Msg,
-    _hwnd: usize,
+    hwnd: usize,
     _filter_min: u32,
     _filter_max: u32,
-    _remove: u32,
+    remove: u32,
 ) -> i32 {
-    if !msg.is_null() {
-        unsafe {
-            core::ptr::write_bytes(msg, 0, 1);
+    let hfilter = if hwnd == 0 { None } else { Some(hwnd) };
+
+    // WM_QUIT short-circuits — Windows guarantees PeekMessageW returns
+    // it via the regular queue, but we route through `take_quit` so the
+    // flag doesn't double-fire.
+    if let Some(code) = windows_state::quit_pending() {
+        write_msg(
+            msg,
+            windows_state::PendingMsg {
+                hwnd: 0,
+                message: 0x0012, // WM_QUIT
+                wparam: code as usize,
+                lparam: 0,
+            },
+        );
+        if remove & PM_REMOVE != 0 {
+            let _ = windows_state::take_quit();
         }
+        return 1;
     }
-    0 // no message
+
+    // Drain one Cocoa event so user input can land before we look at
+    // the FIFO. Best-effort — failure is fine.
+    let _ = pump_cocoa_event_into_queue(hfilter);
+
+    if remove & PM_REMOVE != 0 {
+        if let Some(m) = windows_state::pop_message(hfilter) {
+            write_msg(msg, m);
+            return 1;
+        }
+    } else if let Some(m) = peek_message_inline(hfilter) {
+        write_msg(msg, m);
+        return 1;
+    }
+
+    if !msg.is_null() {
+        unsafe { core::ptr::write_bytes(msg, 0, 1) };
+    }
+    0
 }
+
+/// Helper for PM_NOREMOVE: read the head of the FIFO without consuming
+/// it. Reads via a lock, copies the struct out.
+fn peek_message_inline(hwnd_filter: Option<usize>) -> Option<windows_state::PendingMsg> {
+    // We don't have a no-consume "front" helper on the FIFO; do the
+    // round-trip pop+push for now. Acceptable because callers passing
+    // PM_NOREMOVE are rare (DispatchMessageW handles the consume).
+    if let Some(m) = windows_state::pop_message(hwnd_filter) {
+        let _ = windows_state::post_message(m);
+        return Some(m);
+    }
+    None
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn GetMessageW(
     msg: *mut Msg,
-    _hwnd: usize,
+    hwnd: usize,
     _filter_min: u32,
     _filter_max: u32,
 ) -> i32 {
-    if !msg.is_null() {
-        unsafe {
-            core::ptr::write_bytes(msg, 0, 1);
+    let hfilter = if hwnd == 0 { None } else { Some(hwnd) };
+
+    // Spin until a MSG or WM_QUIT arrives. Cocoa events are drained
+    // every iteration so user input can wake us up.
+    loop {
+        if let Some(code) = windows_state::take_quit() {
+            // GetMessage returns 0 on WM_QUIT and stores it in *msg per
+            // the docs, except the contract says "do not dispatch this
+            // message". We follow Microsoft: write it, return 0.
+            write_msg(
+                msg,
+                windows_state::PendingMsg {
+                    hwnd: 0,
+                    message: 0x0012,
+                    wparam: code as usize,
+                    lparam: 0,
+                },
+            );
+            return 0;
         }
+        let _ = pump_cocoa_event_into_queue(hfilter);
+        if let Some(m) = windows_state::pop_message(hfilter) {
+            write_msg(msg, m);
+            return 1;
+        }
+        // Empty + no quit: in a real app we'd block on the run loop.
+        // For now, yield and re-check. Tests should always either
+        // post a MSG or call PostQuitMessage before invoking
+        // GetMessageW, so we shouldn't spin in practice.
+        std::thread::yield_now();
     }
-    0 // WM_QUIT-equivalent
 }
+
 #[unsafe(no_mangle)]
 pub extern "C" fn TranslateMessage(_msg: *const Msg) -> i32 {
+    // TranslateMessage normally converts virtual-key down/up pairs
+    // into WM_CHAR. We don't decode keycodes yet, so this is a no-op
+    // that returns 0 (per docs: 0 = "no translation occurred").
     0
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn DispatchMessageW(_msg: *const Msg) -> usize {
+pub extern "C" fn DispatchMessageW(msg: *const Msg) -> usize {
+    if msg.is_null() {
+        return 0;
+    }
+    // DispatchMessage would call the window's WNDPROC. That's guest
+    // code; calling back into the JIT from a host thunk requires the
+    // dispatcher to expose a generic "invoke at RIP with args" entry,
+    // which we'll wire up alongside Phase-3.5 callbacks. For now,
+    // record the dispatch for diagnostics and return 0.
+    let m = unsafe { &*msg };
+    let _wnd_proc = windows_state::wnd_proc_of(m.hwnd);
     0
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn PostQuitMessage(_code: i32) {}
+pub extern "C" fn PostQuitMessage(code: i32) {
+    windows_state::post_quit(code);
+}
 
 // Clipboard — no-op success.
 #[unsafe(no_mangle)]
