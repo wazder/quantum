@@ -1001,16 +1001,15 @@ fn run_dispatcher_loop(
     // single counter compare.
     const PUMP_EVERY: u64 = 4096;
     let mut pump_counter: u64 = 0;
-    // Block-chaining bookkeeping:
-    //   chain_sites: guest_rip → (patch_site_addr, target_rip) for every
-    //                 translated block whose Op::Jmp terminator left us
-    //                 a `B +1` placeholder.
-    //   pending: set whenever we just ran a block with chain info, so the
-    //            NEXT iteration can patch it once the target's host
-    //            address is known.
-    let mut chain_sites: std::collections::HashMap<u64, (*mut u32, u64)> =
+    // Block-chaining bookkeeping. `unpatched` maps a *target* guest
+    // RIP to the list of `B +1` placeholder addresses waiting to be
+    // rewritten to point at it. A block with an Op::Jmp terminator
+    // registers one entry; an Op::Jcc registers two (taken +
+    // fallthrough). When the dispatcher next enters a block whose
+    // start RIP equals a pending target, every site waiting on it is
+    // patched in one go and removed.
+    let mut unpatched: std::collections::HashMap<u64, Vec<*mut u32>> =
         std::collections::HashMap::new();
-    let mut pending: Option<(*mut u32, u64)> = None;
     loop {
         iters += 1;
         if iters > 10_000_000 {
@@ -1049,40 +1048,33 @@ fn run_dispatcher_loop(
             let host_ptr = disp
                 .install(current_rip, &block.host_bytes)
                 .map_err(RunError::Dispatcher)?;
-            // If this block has a chainable terminator, remember where
-            // the `B +1` placeholder lives so a later iteration can
-            // rewrite it.
-            if let (Some(off), Some(target)) =
-                (block.chain_patch_offset, block.chain_target)
-            {
+            // Register every chainable placeholder this block emitted
+            // (1 for Op::Jmp, 2 for Op::Jcc), keyed by the target RIP
+            // each one wants to resolve to.
+            for &(off, target) in &block.chain_patches {
                 let site = unsafe { host_ptr.as_ptr().add(off as usize) as *mut u32 };
-                chain_sites.insert(current_rip, (site, target));
+                unpatched.entry(target).or_default().push(site);
             }
             host_ptr
         };
 
-        // Patch the previous block's exit if it was waiting for this rip.
-        // Chain B targets the hot entry of the destination block (i.e.
-        // start + DISPATCHER_HOT_ENTRY_OFFSET) so the destination skips
-        // its cold prologue's pushes — the chained-from block left the
-        // frame intact.
-        if let Some((site, target_rip)) = pending.take()
-            && target_rip == current_rip
-        {
+        // Any placeholder waiting for *this* RIP can now be patched —
+        // the destination block exists. Chain B targets its hot entry
+        // (start + DISPATCHER_HOT_ENTRY_OFFSET) so it skips the cold
+        // prologue pushes; the chained-from block left the host frame
+        // intact.
+        if let Some(sites) = unpatched.remove(&current_rip) {
             let hot = unsafe {
                 (ptr.as_ptr() as *const u8)
                     .add(quantum_jit::block::DISPATCHER_HOT_ENTRY_OFFSET as usize)
             };
-            // SAFETY: both site and hot point inside the dispatcher's
-            // code cache (we installed both via `disp.install`).
-            unsafe {
-                disp.patch_chain(site, hot);
+            for site in sites {
+                // SAFETY: both site and hot point inside the
+                // dispatcher's code cache (installed via disp.install).
+                unsafe {
+                    disp.patch_chain(site, hot);
+                }
             }
-        }
-
-        // Set up pending patch for the block we're about to invoke.
-        if let Some(&(site, target)) = chain_sites.get(&current_rip) {
-            pending = Some((site, target));
         }
 
         LAST_ENTERED_RIP.store(current_rip, Ordering::SeqCst);

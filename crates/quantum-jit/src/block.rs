@@ -63,15 +63,12 @@ impl From<FinishError> for BlockError {
 pub struct Block {
     pub host_bytes: Vec<u8>,
     pub guest_len: usize,
-    /// Byte offset of a `B +1` placeholder we can rewrite into a
-    /// direct branch to the next block's host code. Set only for
-    /// blocks whose terminator has a single, statically-known target
-    /// (currently: `Op::Jmp` rel32). `None` for everything else.
-    pub chain_patch_offset: Option<u32>,
-    /// Guest RIP the chain B should resolve to, once that block is
-    /// translated. Tracked alongside the patch offset; the dispatcher
-    /// performs the rewrite the first time it observes both sides.
-    pub chain_target: Option<u64>,
+    /// `(byte_offset, target_rip)` pairs for every `B +1` placeholder
+    /// the dispatcher can rewrite into a direct branch to the target
+    /// block. `Op::Jmp` contributes one (its single statically-known
+    /// target); `Op::Jcc` contributes two (taken + fallthrough). Empty
+    /// for terminators with runtime-resolved targets (Ret / indirect).
+    pub chain_patches: Vec<(u32, u64)>,
 }
 
 /// Detect a Steam-DRM `int3; jmp -3` anti-debug trap at the start of
@@ -171,9 +168,8 @@ pub fn translate_for_dispatcher(
 
     let mut emitter = Emitter::new();
 
-    // Chain-patch metadata populated by the Op::Jmp arm below.
-    let mut chain_jmp_patch_offset: Option<u32> = None;
-    let mut chain_jmp_target: Option<u64> = None;
+    // Chain-patch metadata populated by the Op::Jmp / Op::Jcc arms.
+    let mut chain_patches: Vec<(u32, u64)> = Vec::new();
 
     // (We used to peephole the Steam DRM `int3; jmp -3` trap into a no-op
     // that skipped past both instructions. That was wrong when a DRM
@@ -276,9 +272,8 @@ pub fn translate_for_dispatcher(
             // wasteful but correctness-preserving; a future commit
             // can flow-analyse regs to elide some spills.
             emit_regs_to_ctx(&mut emitter);
-            chain_jmp_patch_offset = Some(emitter.bytes().len() as u32);
+            chain_patches.push((emitter.bytes().len() as u32, target));
             emitter.raw_word(0x1400_0001);
-            chain_jmp_target = Some(target);
             use crate::emitter::Reg;
             emitter.load_const64(Reg::X0, target);
             emit_host_epilogue(&mut emitter);
@@ -318,11 +313,26 @@ pub fn translate_for_dispatcher(
             let a64_cond = cond_x86_to_a64(cond).ok_or(BlockError::UnsupportedCondition)?;
             let taken_label = emitter.make_label();
             emitter.b_cond(a64_cond, taken_label);
-            // Fallthrough side.
-            emit_epilogue_const_rip(&mut emitter, fallthrough_rip);
-            // Taken side.
+            use crate::emitter::Reg;
+            // Both sides are statically-known targets → both get a
+            // chain placeholder. Inner-loop back-edges (`dec ecx;
+            // jnz .loop`) are the hottest control flow in real game
+            // code, so chaining the conditional sides matters as much
+            // as the unconditional Jmp case.
+            //
+            // Fallthrough side:
+            emit_regs_to_ctx(&mut emitter);
+            chain_patches.push((emitter.bytes().len() as u32, fallthrough_rip));
+            emitter.raw_word(0x1400_0001);
+            emitter.load_const64(Reg::X0, fallthrough_rip);
+            emit_host_epilogue(&mut emitter);
+            // Taken side:
             emitter.bind(taken_label);
-            emit_epilogue_const_rip(&mut emitter, taken_rip);
+            emit_regs_to_ctx(&mut emitter);
+            chain_patches.push((emitter.bytes().len() as u32, taken_rip));
+            emitter.raw_word(0x1400_0001);
+            emitter.load_const64(Reg::X0, taken_rip);
+            emit_host_epilogue(&mut emitter);
         }
         Op::JmpIndirect => {
             // Resolve the indirect target into X16 and use it as next_rip.
@@ -360,8 +370,7 @@ pub fn translate_for_dispatcher(
     Ok(Block {
         host_bytes: emitter.bytes(),
         guest_len,
-        chain_patch_offset: chain_jmp_patch_offset,
-        chain_target: chain_jmp_target,
+        chain_patches,
     })
 }
 
@@ -541,7 +550,6 @@ pub fn translate_with_stack(
     Ok(Block {
         host_bytes: emitter.bytes(),
         guest_len,
-        chain_patch_offset: None,
-        chain_target: None,
+        chain_patches: Vec::new(),
     })
 }
