@@ -652,6 +652,55 @@ impl<'a> Decoder<'a> {
                     rip,
                 ))
             }
+            // 0xA4 / 0xA5 MOVS r/m → r/m (rep-prefixed in REP MOVSB/MOVSQ).
+            //   A4: 1-byte lanes
+            //   A5: REX.W → 8-byte, else default 4
+            // Operands encode (size_bytes, rep_flag) as two Imm cells so
+            // the lifter can pick the right LDR/STR width + loop shape.
+            0xA4 => Ok(make(
+                Op::Movs,
+                [
+                    Some(Operand::Imm(1, OpSize::B1)),
+                    Some(Operand::Imm(i64::from(p.repe), OpSize::B1)),
+                    None,
+                ],
+                rip,
+            )),
+            0xA5 => {
+                let size_bytes: i64 = if p.rex.w { 8 } else { 4 };
+                Ok(make(
+                    Op::Movs,
+                    [
+                        Some(Operand::Imm(size_bytes, OpSize::B1)),
+                        Some(Operand::Imm(i64::from(p.repe), OpSize::B1)),
+                        None,
+                    ],
+                    rip,
+                ))
+            }
+            // 0xAA / 0xAB STOS — write RAX (lower bits) to [RDI], inc RDI,
+            // loop while RCX>0 if rep-prefixed.
+            0xAA => Ok(make(
+                Op::Stos,
+                [
+                    Some(Operand::Imm(1, OpSize::B1)),
+                    Some(Operand::Imm(i64::from(p.repe), OpSize::B1)),
+                    None,
+                ],
+                rip,
+            )),
+            0xAB => {
+                let size_bytes: i64 = if p.rex.w { 8 } else { 4 };
+                Ok(make(
+                    Op::Stos,
+                    [
+                        Some(Operand::Imm(size_bytes, OpSize::B1)),
+                        Some(Operand::Imm(i64::from(p.repe), OpSize::B1)),
+                        None,
+                    ],
+                    rip,
+                ))
+            }
             // 0xC3 RET
             0xC3 => Ok(make(Op::Ret, [None, None, None], rip)),
             // 0xC6/C7 MOV r/m, imm (group 11 /0)

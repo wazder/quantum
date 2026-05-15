@@ -214,9 +214,115 @@ impl<'a> Lifter<'a> {
                 self.emitter.brk(0);
                 Ok(())
             }
+            Op::Movs => self.lift_movs(inst),
+            Op::Stos => self.lift_stos(inst),
             Op::Unhandled => Err(LifterError::Unhandled),
             other => Err(LifterError::Unsupported(other)),
         }
+    }
+
+    /// `REP MOVSB / MOVSD / MOVSQ` — copy RCX lanes from `[RSI]` to
+    /// `[RDI]`, advancing both pointers by `size` each iteration.
+    /// DF=0 is assumed (the most common case after `cld` and the
+    /// default Win64 ABI invariant for entry to thunks); DF=1 (`std`)
+    /// guests would step backwards, which we don't model yet. Non-rep
+    /// (single-iteration) variants share the loop and just rely on
+    /// RCX = 1 from the caller; the lifter doesn't shortcut.
+    fn lift_movs(&mut self, inst: &Inst) -> LifterResult<()> {
+        let size = match inst.operands[0] {
+            Some(Operand::Imm(n, _)) => n as u32,
+            _ => return Err(LifterError::BadOperands),
+        };
+        let rep = matches!(inst.operands[1], Some(Operand::Imm(1, _)));
+        self.emit_rep_loop(size, rep, /*is_stos=*/ false)
+    }
+
+    /// `REP STOSB / STOSD / STOSQ` — write RAX (low `size` bytes) to
+    /// `[RDI]`, advance RDI, decrement RCX. Same DF=0 assumption as
+    /// MOVS.
+    fn lift_stos(&mut self, inst: &Inst) -> LifterResult<()> {
+        let size = match inst.operands[0] {
+            Some(Operand::Imm(n, _)) => n as u32,
+            _ => return Err(LifterError::BadOperands),
+        };
+        let rep = matches!(inst.operands[1], Some(Operand::Imm(1, _)));
+        self.emit_rep_loop(size, rep, /*is_stos=*/ true)
+    }
+
+    /// Emit an AArch64 loop for REP MOVS / REP STOS. Pinning:
+    ///   RCX = X1, RSI = X6, RDI = X7, RAX = X0.
+    /// Loop shape (for both forms):
+    ///   loop_top:
+    ///     cbz   X1, done           ; RCX == 0 → exit
+    ///     ldr/str <size>            ; one lane
+    ///     add   X6/X7, …, #size     ; advance source / dest
+    ///     sub   X1, X1, #1          ; RCX--
+    ///     b     loop_top
+    ///   done:
+    fn emit_rep_loop(&mut self, size: u32, rep: bool, is_stos: bool) -> LifterResult<()> {
+        // Allow only the lane widths we actually encode below.
+        if !matches!(size, 1 | 2 | 4 | 8) {
+            return Err(LifterError::Unsupported(if is_stos {
+                Op::Stos
+            } else {
+                Op::Movs
+            }));
+        }
+        // For the non-rep single-iteration variant, simulate "loop once
+        // unconditionally". Easiest: skip the cbz guard entirely.
+        let loop_top = self.emitter.make_label();
+        let done = self.emitter.make_label();
+        if rep {
+            self.emitter.bind(loop_top);
+            self.emitter.cbz64(Reg::x(1), done); // RCX == 0?
+        } else {
+            // For the non-REP path we still want a single iteration.
+            // Skip cbz; the rest of the loop body runs once.
+            self.emitter.bind(loop_top);
+        }
+        if is_stos {
+            // RDI is X7, RAX is X0. Write low `size` bytes of X0 to [X7].
+            match size {
+                1 => self.emitter.strb(Reg::X0, Reg::x(7), 0),
+                2 => self.emitter.strh(Reg::X0, Reg::x(7), 0),
+                4 => self.emitter.str32(Reg::X0, Reg::x(7), 0),
+                8 => self.emitter.str64(Reg::X0, Reg::x(7), 0),
+                _ => unreachable!(),
+            }
+        } else {
+            // MOVS: load [RSI=X6] into X16, store to [RDI=X7].
+            match size {
+                1 => {
+                    self.emitter.ldrb(Reg::X16, Reg::x(6), 0);
+                    self.emitter.strb(Reg::X16, Reg::x(7), 0);
+                }
+                2 => {
+                    self.emitter.ldrh(Reg::X16, Reg::x(6), 0);
+                    self.emitter.strh(Reg::X16, Reg::x(7), 0);
+                }
+                4 => {
+                    self.emitter.ldr32(Reg::X16, Reg::x(6), 0);
+                    self.emitter.str32(Reg::X16, Reg::x(7), 0);
+                }
+                8 => {
+                    self.emitter.ldr64(Reg::X16, Reg::x(6), 0);
+                    self.emitter.str64(Reg::X16, Reg::x(7), 0);
+                }
+                _ => unreachable!(),
+            }
+            // Advance RSI.
+            self.emitter.add64_imm(Reg::x(6), Reg::x(6), size);
+        }
+        // Advance RDI in both variants.
+        self.emitter.add64_imm(Reg::x(7), Reg::x(7), size);
+        if rep {
+            // RCX--.
+            self.emitter.sub64_imm(Reg::x(1), Reg::x(1), 1);
+            // Loop.
+            self.emitter.b(loop_top);
+            self.emitter.bind(done);
+        }
+        Ok(())
     }
 
     /// Compute the effective guest address of a memory operand into
@@ -3144,6 +3250,40 @@ mod tests {
         let words = lift_one(&[0x48, 0x89, 0x4C, 0x24, 0x08]);
         // Should emit mov xtmp, x19 (rsp) then str x1 (rcx), [xtmp, #8].
         assert!(!words.is_empty(), "expected non-empty emission");
+    }
+
+    #[test]
+    fn rep_movsb_lifts_to_loop() {
+        // F3 A4 — REP MOVSB. Should emit a loop with a CBZ guard,
+        // LDRB/STRB pair, two ADD #1, SUB #1, B back to top.
+        let words = lift_one(&[0xF3, 0xA4]);
+        // CBZ encoding family: 0xB400_0000 base. cbz X1 = | (rt=1)
+        let cbz_x1_base = 0xB400_0000_u32 | 1; // approx match (offset bits vary)
+        let cbz_present = words
+            .iter()
+            .any(|&w| (w & 0xFF00_001F) == (cbz_x1_base & 0xFF00_001F));
+        assert!(cbz_present, "REP MOVSB missing CBZ X1 guard; got: {words:08X?}");
+        // STRB (immediate, unsigned offset) X16 to [X7, #0]:
+        //   base 0x3900_0000 | (Rn=7 << 5) | Rt=16 -> 0x3900_00F0
+        let strb_x16_x7 = 0x3900_0000_u32 | (7 << 5) | 16;
+        assert!(words.contains(&strb_x16_x7), "missing STRB X16, [X7]");
+        // ADD X6, X6, #1 (encoding 0x9100_04C6)
+        assert!(words.contains(&0x9100_04C6_u32), "missing ADD X6, X6, #1");
+        // ADD X7, X7, #1
+        assert!(words.contains(&0x9100_04E7_u32), "missing ADD X7, X7, #1");
+    }
+
+    #[test]
+    fn rep_stosq_lifts_to_loop() {
+        // F3 48 AB — REP STOSQ (REX.W + AB + REP). 8-byte lanes.
+        let words = lift_one(&[0xF3, 0x48, 0xAB]);
+        // STR X0, [X7] (unsigned offset 0): 0xF900_0000 | (Rn=7 << 5) | Rt=0
+        let str_x0_x7 = 0xF900_0000_u32 | (7 << 5);
+        assert!(words.contains(&str_x0_x7), "missing STR X0, [X7] for REP STOSQ");
+        // ADD X7, X7, #8 -> 0x9100_20E7
+        assert!(words.contains(&0x9100_20E7_u32), "missing ADD X7, X7, #8");
+        // SUB X1, X1, #1 -> 0xD100_0421
+        assert!(words.contains(&0xD100_0421_u32), "missing SUB X1, X1, #1");
     }
 
     #[test]
