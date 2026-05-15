@@ -1570,6 +1570,14 @@ pub extern "C" fn GetModuleHandleExW(_flags: u32, _name: *const u16, h_out: *mut
 
 // =============== System info / version ===============
 
+/// `GetNativeSystemInfo` — the WOW64-aware variant. On 64-bit Windows
+/// this is identical to GetSystemInfo (no 32-bit emulation in play);
+/// we route through it.
+#[unsafe(no_mangle)]
+pub extern "C" fn GetNativeSystemInfo(info: *mut c_void) {
+    GetSystemInfo(info);
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn GetSystemInfo(info: *mut c_void) {
     if info.is_null() {

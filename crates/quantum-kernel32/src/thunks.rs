@@ -374,6 +374,7 @@ fn resolve_kernel32(function: &str) -> Option<u64> {
 
         // System info / time
         "GetSystemInfo" => crate::stubs::GetSystemInfo as *const (),
+        "GetNativeSystemInfo" => crate::stubs::GetNativeSystemInfo as *const (),
         "GetLocalTime" => crate::stubs::GetLocalTime as *const (),
         "FileTimeToLocalFileTime" => crate::stubs::FileTimeToLocalFileTime as *const (),
         "LocalFileTimeToFileTime" => crate::stubs::LocalFileTimeToFileTime as *const (),
