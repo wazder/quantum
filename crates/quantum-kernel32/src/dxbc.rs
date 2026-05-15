@@ -736,7 +736,28 @@ fn render_operand(op: &Operand) -> String {
             ),
             _ => "/* imm-malformed */ 0.0".to_string(),
         },
-        other => format!("/* TODO operand {other:?} */ 0.0"),
+        OperandType::ConstantBuffer => {
+            // `cb<n>[m]` in DXBC notation — n is the constant-buffer
+            // slot (set via VSSetConstantBuffers / PSSetConstantBuffers)
+            // and m is the dword index inside the buffer. Our minimal
+            // operand decoder only captures the first index; a full
+            // implementation walks the 2-D index decode and produces
+            // a real Metal [[buffer(n)]] access. For now emit a stable
+            // reference the transpiler can later substitute.
+            format!(
+                "cb{}[{}]{}",
+                op.index0,
+                op.imm[0], // placeholder: real second dim index
+                select_suffix(op.selection)
+            )
+        }
+        OperandType::Sampler => format!("s{}{}", op.index0, select_suffix(op.selection)),
+        OperandType::Resource => format!("t{}{}", op.index0, select_suffix(op.selection)),
+        OperandType::IndexableTemp => {
+            format!("x{}{}", op.index0, select_suffix(op.selection))
+        }
+        OperandType::NullObject => "/* null-object */ 0.0".to_string(),
+        OperandType::Unknown(raw) => format!("/* TODO operand Unknown({raw}) */ 0.0"),
     }
 }
 
@@ -1015,6 +1036,40 @@ mod tests {
             Some(Err(DecodeError::InstructionOob { length: 5, .. })) => {}
             other => panic!("expected InstructionOob, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn render_constant_buffer_operand_emits_cb_index() {
+        let op = Operand {
+            op_type: OperandType::ConstantBuffer,
+            selection: ComponentSelect::Swizzle([0, 1, 2, 3]),
+            index0: 2,
+            imm: [5, 0, 0, 0],
+            imm_len: 0,
+        };
+        let s = render_operand(&op);
+        assert!(s.contains("cb2["), "expected cb2[…] prefix, got {s}");
+        assert!(s.contains(".xyzw"), "expected swizzle suffix");
+    }
+
+    #[test]
+    fn render_sampler_and_resource_operands() {
+        let s = render_operand(&Operand {
+            op_type: OperandType::Sampler,
+            selection: ComponentSelect::None,
+            index0: 1,
+            imm: [0; 4],
+            imm_len: 0,
+        });
+        assert_eq!(s, "s1");
+        let t = render_operand(&Operand {
+            op_type: OperandType::Resource,
+            selection: ComponentSelect::Select1(2),
+            index0: 3,
+            imm: [0; 4],
+            imm_len: 0,
+        });
+        assert_eq!(t, "t3.z");
     }
 
     #[test]
