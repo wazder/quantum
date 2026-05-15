@@ -619,6 +619,61 @@ pub fn metal_library_function(library: *mut c_void, name: &str) -> *mut c_void {
     msg_send_obj1(library, sel("newFunctionWithName:\0"), ns)
 }
 
+/// Assemble a `MTLRenderPipelineState` from a vertex + fragment
+/// MTLFunction pair targeting one colour attachment of `pixel_format`
+/// (an `MTLPixelFormat` enum value — 80 = BGRA8Unorm, the swap-chain
+/// default). This is the keystone object every real draw call binds
+/// before issuing primitives.
+///
+/// Returns the retained pipeline state, or null when Metal is
+/// unreachable or the descriptor fails validation (e.g. the vertex
+/// function's output doesn't line up — non-fatal, the draw path
+/// skips).
+pub fn metal_new_render_pipeline_state(
+    vertex_fn: *mut c_void,
+    fragment_fn: *mut c_void,
+    pixel_format: u64,
+) -> *mut c_void {
+    let device = metal_default_device();
+    if device.is_null() || vertex_fn.is_null() {
+        return core::ptr::null_mut();
+    }
+    // descriptor = [[MTLRenderPipelineDescriptor alloc] init]
+    let desc_cls = class_named("MTLRenderPipelineDescriptor\0");
+    if desc_cls.is_null() {
+        return core::ptr::null_mut();
+    }
+    let desc = msg_send_obj(msg_send_obj(desc_cls, sel("alloc\0")), sel("init\0"));
+    if desc.is_null() {
+        return core::ptr::null_mut();
+    }
+    msg_send_void1(desc, sel("setVertexFunction:\0"), vertex_fn);
+    if !fragment_fn.is_null() {
+        msg_send_void1(desc, sel("setFragmentFunction:\0"), fragment_fn);
+    }
+    // desc.colorAttachments[0].pixelFormat = pixel_format
+    let attachments = msg_send_obj(desc, sel("colorAttachments\0"));
+    if !attachments.is_null() {
+        type FIdx = unsafe extern "C" fn(Object, Sel, u64) -> Object;
+        let fidx: FIdx = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+        let a0 = unsafe { fidx(attachments, sel("objectAtIndexedSubscript:\0"), 0) };
+        if !a0.is_null() {
+            type FU = unsafe extern "C" fn(Object, Sel, u64);
+            let fu: FU = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+            unsafe {
+                fu(a0, sel("setPixelFormat:\0"), pixel_format);
+            }
+        }
+    }
+    // [device newRenderPipelineStateWithDescriptor:desc error:NULL]
+    let sel_new = sel("newRenderPipelineStateWithDescriptor:error:\0");
+    type F = unsafe extern "C" fn(Object, Sel, Object, *mut Object) -> Object;
+    // SAFETY: device is the MTLDevice; selector + shapes match the
+    // documented MTLDevice protocol.
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe { f(device, sel_new, desc, core::ptr::null_mut()) }
+}
+
 /// `[queue commandBuffer]` — autoreleased MTLCommandBuffer.
 pub fn metal_command_buffer(queue: *mut c_void) -> *mut c_void {
     if queue.is_null() {
@@ -847,6 +902,41 @@ mod tests {
     fn nsapp_class_resolves() {
         // On a real macOS host AppKit is always present.
         assert!(appkit_available(), "AppKit must be linked");
+    }
+
+    #[test]
+    fn render_pipeline_state_assembles_from_vs_ps_pair() {
+        if !metal_available() {
+            eprintln!("Metal unavailable; skipping");
+            return;
+        }
+        // A minimal but complete vertex+fragment program: the vertex
+        // emits a clip-space position, the fragment a solid colour.
+        // This is exactly the shape emit_msl now targets.
+        let src = "#include <metal_stdlib>\n\
+                   using namespace metal;\n\
+                   struct VsOut { float4 pos [[position]]; };\n\
+                   vertex VsOut main_vs(uint vid [[vertex_id]]) {\n\
+                     VsOut o; o.pos = float4(0.0, 0.0, 0.0, 1.0); return o;\n\
+                   }\n\
+                   fragment float4 main_ps() {\n\
+                     return float4(1.0, 0.5, 0.0, 1.0);\n\
+                   }\n";
+        let lib = metal_new_library(src);
+        assert!(!lib.is_null(), "VS+PS source must compile");
+        let vs = metal_library_function(lib, "main_vs");
+        let ps = metal_library_function(lib, "main_ps");
+        assert!(!vs.is_null() && !ps.is_null(), "both stages must resolve");
+        // 80 = MTLPixelFormatBGRA8Unorm (swap-chain default).
+        let pso = metal_new_render_pipeline_state(vs, ps, 80);
+        assert!(
+            !pso.is_null(),
+            "a valid VS+PS pair must assemble into an MTLRenderPipelineState"
+        );
+        release(pso);
+        release(vs);
+        release(ps);
+        release(lib);
     }
 
     #[test]
