@@ -604,6 +604,174 @@ const D3D11_CTX_CLEAR_RENDER_TARGET_VIEW_SLOT: usize = 50;
 /// args we don't read.
 extern "C" fn ctx_noop_void() {}
 
+// ---------- DrawState tracking ----------
+//
+// Real games make ~thousands of state-setter calls per frame
+// (IASetVertexBuffers, VSSetShader, …) interleaved with Draw /
+// DrawIndexed. The setters used to be silent no-ops, which meant a
+// guest's render path silently dropped every binding before reaching
+// the (also no-op) Draw — there was no signal at all that the API
+// path was being exercised. This commit records the most-recent set
+// of each binding in a mutex-guarded DrawState, plus an atomic Draw
+// counter, so tests can verify the path executed end to end.
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DrawState {
+    pub vs_shader: usize,
+    pub ps_shader: usize,
+    pub vertex_buffer: usize,
+    pub vertex_stride: u32,
+    pub vertex_offset: u32,
+    pub index_buffer: usize,
+    pub index_format: u32,
+    pub input_layout: usize,
+    pub primitive_topology: u32,
+    pub render_target: usize,
+    pub viewport_w: f32,
+    pub viewport_h: f32,
+}
+
+fn draw_state() -> &'static std::sync::Mutex<DrawState> {
+    use std::sync::OnceLock;
+    static S: OnceLock<std::sync::Mutex<DrawState>> = OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(DrawState::default()))
+}
+
+/// Read a snapshot of the current draw state. Useful for tests and
+/// runtime diagnostics. The returned value is a clone — concurrent
+/// updates won't be observed.
+pub fn snapshot_draw_state() -> DrawState {
+    *draw_state().lock().unwrap()
+}
+
+/// Number of `Draw` / `DrawIndexed` invocations seen since process
+/// start. Atomic so multiple guest threads can increment concurrently
+/// without locking.
+pub fn draw_count() -> u32 {
+    use core::sync::atomic::Ordering;
+    DRAW_COUNTER.load(Ordering::SeqCst)
+}
+
+static DRAW_COUNTER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn ctx_vs_set_shader(
+    _this: *mut c_void,
+    p_shader: usize,
+    _p_class_instances: *mut c_void,
+    _num_class_instances: u32,
+) {
+    draw_state().lock().unwrap().vs_shader = p_shader;
+}
+
+extern "C" fn ctx_ps_set_shader(
+    _this: *mut c_void,
+    p_shader: usize,
+    _p_class_instances: *mut c_void,
+    _num_class_instances: u32,
+) {
+    draw_state().lock().unwrap().ps_shader = p_shader;
+}
+
+extern "C" fn ctx_ia_set_input_layout(_this: *mut c_void, p_input_layout: usize) {
+    draw_state().lock().unwrap().input_layout = p_input_layout;
+}
+
+extern "C" fn ctx_ia_set_primitive_topology(_this: *mut c_void, topology: u32) {
+    draw_state().lock().unwrap().primitive_topology = topology;
+}
+
+extern "C" fn ctx_ia_set_vertex_buffers(
+    _this: *mut c_void,
+    _start_slot: u32,
+    num_buffers: u32,
+    pp_buffers: *const *mut c_void,
+    p_strides: *const u32,
+    p_offsets: *const u32,
+) {
+    if num_buffers == 0 || pp_buffers.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees pp_buffers points at an array of
+    // `num_buffers` ID3D11Buffer pointers; same for strides/offsets.
+    let buf = unsafe { *pp_buffers };
+    let stride = if !p_strides.is_null() { unsafe { *p_strides } } else { 0 };
+    let offset = if !p_offsets.is_null() { unsafe { *p_offsets } } else { 0 };
+    let mut s = draw_state().lock().unwrap();
+    s.vertex_buffer = buf as usize;
+    s.vertex_stride = stride;
+    s.vertex_offset = offset;
+}
+
+extern "C" fn ctx_ia_set_index_buffer(
+    _this: *mut c_void,
+    p_index_buffer: usize,
+    format: u32,
+    _offset: u32,
+) {
+    let mut s = draw_state().lock().unwrap();
+    s.index_buffer = p_index_buffer;
+    s.index_format = format;
+}
+
+extern "C" fn ctx_om_set_render_targets(
+    _this: *mut c_void,
+    num_views: u32,
+    pp_rtvs: *const *mut c_void,
+    _p_dsv: *mut c_void,
+) {
+    if num_views == 0 || pp_rtvs.is_null() {
+        draw_state().lock().unwrap().render_target = 0;
+        return;
+    }
+    let rtv = unsafe { *pp_rtvs };
+    if rtv.is_null() {
+        return;
+    }
+    // SAFETY: rtv is a ResourceView we ourselves allocated.
+    let view = unsafe { &*(rtv as *const ResourceView) };
+    draw_state().lock().unwrap().render_target = view.resource as usize;
+}
+
+#[repr(C)]
+struct D3D11Viewport {
+    top_left_x: f32,
+    top_left_y: f32,
+    width: f32,
+    height: f32,
+    min_depth: f32,
+    max_depth: f32,
+}
+
+extern "C" fn ctx_rs_set_viewports(
+    _this: *mut c_void,
+    num: u32,
+    p_viewports: *const c_void,
+) {
+    if num == 0 || p_viewports.is_null() {
+        return;
+    }
+    // SAFETY: caller's guest passes an array of D3D11_VIEWPORT.
+    let vp = unsafe { &*(p_viewports as *const D3D11Viewport) };
+    let mut s = draw_state().lock().unwrap();
+    s.viewport_w = vp.width;
+    s.viewport_h = vp.height;
+}
+
+extern "C" fn ctx_draw(_this: *mut c_void, _vertex_count: u32, _start_vertex_location: u32) {
+    use core::sync::atomic::Ordering;
+    DRAW_COUNTER.fetch_add(1, Ordering::SeqCst);
+}
+
+extern "C" fn ctx_draw_indexed(
+    _this: *mut c_void,
+    _index_count: u32,
+    _start_index_location: u32,
+    _base_vertex_location: i32,
+) {
+    use core::sync::atomic::Ordering;
+    DRAW_COUNTER.fetch_add(1, Ordering::SeqCst);
+}
+
 /// `void ID3D11DeviceContext::ClearRenderTargetView(
 ///        ID3D11RenderTargetView *pRenderTargetView,
 ///        const FLOAT ColorRGBA[4])`
@@ -684,26 +852,31 @@ fn context_vtbl() -> &'static DeviceVtbl {
         slots[0] = d3d11_qi as *const () as usize;
         slots[1] = d3d11_addref as *const () as usize;
         slots[2] = d3d11_release as *const () as usize;
-        // State setters — all accept-and-ignore. Bind these to a void
-        // function; the Win64 → AAPCS64 calling convention will silently
-        // drop trailing args we don't read.
+        // State setters that aren't yet stateful (constant buffers,
+        // shader resources, samplers) keep the bare no-op binding.
         for slot in [
             D3D11_CTX_VS_SET_CONSTANT_BUFFERS_SLOT,
             D3D11_CTX_PS_SET_SHADER_RESOURCES_SLOT,
-            D3D11_CTX_PS_SET_SHADER_SLOT,
             D3D11_CTX_PS_SET_SAMPLERS_SLOT,
-            D3D11_CTX_VS_SET_SHADER_SLOT,
-            D3D11_CTX_DRAW_INDEXED_SLOT,
-            D3D11_CTX_DRAW_SLOT,
-            D3D11_CTX_IA_SET_INPUT_LAYOUT_SLOT,
-            D3D11_CTX_IA_SET_VERTEX_BUFFERS_SLOT,
-            D3D11_CTX_IA_SET_INDEX_BUFFER_SLOT,
-            D3D11_CTX_IA_SET_PRIMITIVE_TOPOLOGY_SLOT,
-            D3D11_CTX_OM_SET_RENDER_TARGETS_SLOT,
-            D3D11_CTX_RS_SET_VIEWPORTS_SLOT,
         ] {
             slots[slot] = ctx_noop_void as *const () as usize;
         }
+        // Real state-tracking setters / Draw counters.
+        slots[D3D11_CTX_VS_SET_SHADER_SLOT] = ctx_vs_set_shader as *const () as usize;
+        slots[D3D11_CTX_PS_SET_SHADER_SLOT] = ctx_ps_set_shader as *const () as usize;
+        slots[D3D11_CTX_IA_SET_INPUT_LAYOUT_SLOT] =
+            ctx_ia_set_input_layout as *const () as usize;
+        slots[D3D11_CTX_IA_SET_VERTEX_BUFFERS_SLOT] =
+            ctx_ia_set_vertex_buffers as *const () as usize;
+        slots[D3D11_CTX_IA_SET_INDEX_BUFFER_SLOT] =
+            ctx_ia_set_index_buffer as *const () as usize;
+        slots[D3D11_CTX_IA_SET_PRIMITIVE_TOPOLOGY_SLOT] =
+            ctx_ia_set_primitive_topology as *const () as usize;
+        slots[D3D11_CTX_OM_SET_RENDER_TARGETS_SLOT] =
+            ctx_om_set_render_targets as *const () as usize;
+        slots[D3D11_CTX_RS_SET_VIEWPORTS_SLOT] = ctx_rs_set_viewports as *const () as usize;
+        slots[D3D11_CTX_DRAW_SLOT] = ctx_draw as *const () as usize;
+        slots[D3D11_CTX_DRAW_INDEXED_SLOT] = ctx_draw_indexed as *const () as usize;
         // Override Clear with the real implementation that actually
         // touches the texture bytes.
         slots[D3D11_CTX_CLEAR_RENDER_TARGET_VIEW_SLOT] =
