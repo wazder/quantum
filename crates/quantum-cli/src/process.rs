@@ -995,6 +995,12 @@ fn run_dispatcher_loop(
     let trace = std::env::var("QUANTUM_TRACE_BLOCKS").is_ok();
     let mut current_rip = start_rip;
     let mut iters = 0;
+    // Pump AppKit events every PUMP_EVERY blocks so a guest that
+    // creates a window doesn't appear frozen. The check is a thread-
+    // safe no-op off the main thread, so worker threads pay only a
+    // single counter compare.
+    const PUMP_EVERY: u64 = 4096;
+    let mut pump_counter: u64 = 0;
     // Block-chaining bookkeeping:
     //   chain_sites: guest_rip → (patch_site_addr, target_rip) for every
     //                 translated block whose Op::Jmp terminator left us
@@ -1087,6 +1093,12 @@ fn run_dispatcher_loop(
         if next_rip == STOP_SENTINEL {
             return Ok(());
         }
+
+        pump_counter = pump_counter.wrapping_add(1);
+        if pump_counter.is_multiple_of(PUMP_EVERY) {
+            let _ = quantum_kernel32::cocoa::pump_events_nonblocking();
+        }
+
         current_rip = next_rip;
     }
 }

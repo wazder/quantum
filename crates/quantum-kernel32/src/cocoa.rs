@@ -341,6 +341,59 @@ pub fn close_window(window: *mut c_void) {
     msg_send_void(window, sel("close\0"));
 }
 
+unsafe extern "C" {
+    fn pthread_main_np() -> i32;
+}
+
+/// True when the calling thread is the process's main thread. AppKit
+/// requires this for almost every meaningful API call; the dispatcher
+/// pump uses it to gate its `pump_events_nonblocking` invocation.
+pub fn is_main_thread() -> bool {
+    // SAFETY: pthread_main_np is async-signal-safe and has no
+    // preconditions.
+    unsafe { pthread_main_np() != 0 }
+}
+
+/// Drain AppKit's pending event queue without blocking, dispatching
+/// each event through `[NSApp sendEvent:]`. Safe to call from any
+/// thread — on a non-main thread it returns immediately so the
+/// dispatcher loop doesn't trip an Obj-C exception. Returns the
+/// number of events processed (mainly for telemetry).
+pub fn pump_events_nonblocking() -> u32 {
+    if !is_main_thread() {
+        return 0;
+    }
+    let app = shared_app();
+    if app.is_null() {
+        return 0;
+    }
+    let sel_next = sel("nextEventMatchingMask:untilDate:inMode:dequeue:\0");
+    let sel_send = sel("sendEvent:\0");
+    let mode = nsstring_from_utf8(b"kCFRunLoopDefaultMode\0");
+    let mut count: u32 = 0;
+    loop {
+        let ev = msg_send_next_event(
+            app,
+            sel_next,
+            NS_EVENT_MASK_ANY,
+            core::ptr::null_mut(),
+            mode,
+            true,
+        );
+        if ev.is_null() {
+            break;
+        }
+        msg_send_void1(app, sel_send, ev);
+        count += 1;
+        if count > 256 {
+            // Defence against a runaway producer; we'll come back next
+            // pump tick.
+            break;
+        }
+    }
+    count
+}
+
 /// Try to dequeue one event from NSApp. Returns the raw `NSEvent*` or
 /// null if the queue is empty. Caller does not own the returned pointer
 /// (it lives in the current autorelease pool).
