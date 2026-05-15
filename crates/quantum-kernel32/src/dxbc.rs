@@ -774,20 +774,42 @@ pub fn emit_msl(tokens: &[u32]) -> Result<String, DecodeError> {
     ));
     out.push_str("#include <metal_stdlib>\nusing namespace metal;\n\n");
 
-    // Pick the function attribute + name from the shader stage. We
-    // can't yet emit real `[[stage_in]]` / `[[stage_out]]` structs
-    // because that needs ISGN/OSGN to be threaded into this call; for
-    // now the body operates on locals and writes to `o<n>` registers
-    // which a future emit_msl_with_signature(...) will hoist out.
-    let (attr, name) = match hdr.program_type {
-        ProgramType::Vertex => ("vertex", "main_vs"),
-        ProgramType::Pixel => ("fragment", "main_ps"),
-        ProgramType::Geometry => ("vertex", "main_gs"), // closest fit; real GS not supported
-        ProgramType::Hull | ProgramType::Domain => ("vertex", "main_ds"),
-        ProgramType::Compute => ("kernel", "main_cs"),
-        ProgramType::Unknown(_) => ("kernel", "main_shader"),
+    // Emit a *compilable* signature per stage. Real `[[stage_in]]` /
+    // `[[stage_out]]` structs from ISGN/OSGN are still a follow-up;
+    // until then we use minimal valid prototypes so that even a
+    // trivial shader produces a non-null MTLLibrary:
+    //   vertex   → returns a struct with a [[position]] field
+    //   fragment → returns float4 (the colour)
+    //   compute  → kernel void (always valid)
+    // The body works on r0..r3 locals; the stage-appropriate value is
+    // returned at the end (r0 by convention — most DX shaders leave
+    // their output there after the final mov to o0).
+    #[derive(PartialEq)]
+    enum Stage {
+        Vertex,
+        Fragment,
+        Compute,
+    }
+    let stage = match hdr.program_type {
+        ProgramType::Vertex
+        | ProgramType::Geometry
+        | ProgramType::Hull
+        | ProgramType::Domain => Stage::Vertex,
+        ProgramType::Pixel => Stage::Fragment,
+        ProgramType::Compute | ProgramType::Unknown(_) => Stage::Compute,
     };
-    out.push_str(&format!("{attr} void {name}() {{\n"));
+    match stage {
+        Stage::Vertex => {
+            out.push_str("struct VsOut { float4 pos [[position]]; };\n\n");
+            out.push_str("vertex VsOut main_vs() {\n");
+        }
+        Stage::Fragment => {
+            out.push_str("fragment float4 main_ps() {\n");
+        }
+        Stage::Compute => {
+            out.push_str("kernel void main_cs() {\n");
+        }
+    }
     out.push_str("    float4 r0 = float4(0);\n");
     out.push_str("    float4 r1 = float4(0);\n");
     out.push_str("    float4 r2 = float4(0);\n");
@@ -834,11 +856,29 @@ pub fn emit_msl(tokens: &[u32]) -> Result<String, DecodeError> {
                 ));
             }
             opcode::RET => {
-                out.push_str("    return;\n");
+                // DXBC RET ends the function. We don't honour early
+                // returns yet (most shaders RET once at the end);
+                // the stage-appropriate return is emitted after the
+                // loop so the signature stays valid.
+                out.push_str("    // ret\n");
             }
             other => {
                 out.push_str(&format!("    // unsupported opcode 0x{other:02X}\n"));
             }
+        }
+    }
+    // Stage-appropriate terminal return so the (typed) signature
+    // compiles. r0 holds the shader's last-written output by
+    // convention.
+    match stage {
+        Stage::Vertex => {
+            out.push_str("    VsOut _o; _o.pos = r0; return _o;\n");
+        }
+        Stage::Fragment => {
+            out.push_str("    return r0;\n");
+        }
+        Stage::Compute => {
+            // void — nothing to return.
         }
     }
     out.push_str("}\n");
@@ -1168,7 +1208,8 @@ mod tests {
             msl.contains("r0.xyzw = r1.xyzw;"),
             "MOV should lower to assignment; got:\n{msl}"
         );
-        assert!(msl.contains("return;"));
+        // VS 4.0 → vertex stage: typed return of a [[position]] struct.
+        assert!(msl.contains("VsOut _o; _o.pos = r0; return _o;"), "got:\n{msl}");
     }
 
     /// Build a hand-crafted ISGN/OSGN chunk payload with the given
@@ -1271,8 +1312,36 @@ mod tests {
         let tokens = [version_token, total, ret, 0];
         let msl = emit_msl(&tokens).unwrap();
         assert!(msl.contains("metal_stdlib"));
-        // PS 4.0 → fragment main_ps
-        assert!(msl.contains("fragment void main_ps"), "got:\n{msl}");
-        assert!(msl.contains("return;"));
+        // PS 4.0 → fragment stage returns float4 (the colour).
+        assert!(msl.contains("fragment float4 main_ps"), "got:\n{msl}");
+        assert!(msl.contains("return r0;"), "got:\n{msl}");
+    }
+
+    #[test]
+    fn emitted_msl_compiles_to_a_real_metal_library() {
+        // The end-to-end proof: a trivial vertex shader's emitted MSL
+        // is now valid enough that Metal actually compiles it into an
+        // MTLLibrary. (Pre-this-commit emit_msl produced `vertex void`
+        // which Metal rejects.)
+        if !crate::cocoa::metal_available() {
+            eprintln!("Metal unavailable; skipping");
+            return;
+        }
+        // VS 4.0, 4 tokens: header + RET.
+        let prog = (4u32 << 4) | (1u32 << 16); // major=4, type=VS(1)
+        let total = 4u32;
+        let ret = (opcode::RET as u32) | (2u32 << 24);
+        let tokens = [prog, total, ret, 0];
+        let msl = emit_msl(&tokens).expect("emit");
+        let lib = crate::cocoa::metal_new_library(&msl);
+        assert!(
+            !lib.is_null(),
+            "emitted vertex MSL must compile to a non-null MTLLibrary; \
+             source:\n{msl}"
+        );
+        let f = crate::cocoa::metal_library_function(lib, "main_vs");
+        assert!(!f.is_null(), "main_vs must resolve in the library");
+        crate::cocoa::release(f);
+        crate::cocoa::release(lib);
     }
 }
