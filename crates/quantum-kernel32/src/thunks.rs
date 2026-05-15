@@ -32,6 +32,9 @@ pub fn resolve(dll: &str, function: &str) -> Option<u64> {
     if dll.eq_ignore_ascii_case("gdi32.dll") {
         return crate::gdi32::resolve(function);
     }
+    if dll.eq_ignore_ascii_case("ntdll.dll") {
+        return crate::ntdll::resolve(function);
+    }
     if dll.eq_ignore_ascii_case("msvcrt.dll")
         || dll.eq_ignore_ascii_case("ucrtbase.dll")
         || dll.eq_ignore_ascii_case("vcruntime140.dll")
