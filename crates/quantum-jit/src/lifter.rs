@@ -499,16 +499,33 @@ impl<'a> Lifter<'a> {
                 self.emitter.ldr64(Reg::X16, Reg::X16, leftover);
             }
         }
+        // --- Win64 non-volatile register preservation ---
+        //
+        // Win64 guarantees RBX/RBP/RSI/RDI/R12-R15 survive a CALL.
+        // Our pinning maps those to AArch64 X3/X5/X6/X7/X12-X15, all
+        // of which are *caller-saved* under AAPCS64 — a Rust thunk is
+        // free to clobber them. Worse, the arg-marshalling below
+        // overwrites X3 (mov X3,X9) and the X5..X7 stack-arg loads
+        // clobber RBP/RSI/RDI before the call even happens.
+        //
+        // Save the eight guest non-volatile regs on the host stack
+        // before marshalling, restore after the call. RSP (X19) is
+        // AAPCS64 callee-saved so the thunk preserves it for free; the
+        // volatile guest regs (RAX/RCX/RDX/R8-R11) we deliberately
+        // don't preserve — the guest doesn't expect them to survive a
+        // CALL either. 4 stp pairs = 64 bytes, 16-byte aligned.
+        self.emitter.stp64_pre(Reg::X3, Reg::x(5), Reg::SP, -16);
+        self.emitter.stp64_pre(Reg::x(6), Reg::x(7), Reg::SP, -16);
+        self.emitter.stp64_pre(Reg::x(12), Reg::x(13), Reg::SP, -16);
+        self.emitter.stp64_pre(Reg::x(14), Reg::x(15), Reg::SP, -16);
+
         // Multi-argument Win64 -> AAPCS64 marshaling.
         //
         // Win64 places args 1..4 in RCX/RDX/R8/R9; AAPCS64 puts them in
         // X0/X1/X2/X3. In our pinning RCX=X1, RDX=X2, R8=X8, R9=X9.
         //
         // The four moves below are sequenced so each write happens
-        // *after* the next source is read. That avoids any scratch
-        // saving (and crucially avoids touching AArch64 callee-saved
-        // registers X19..X28, which would corrupt the host caller's
-        // state and surface as a SIGSEGV on return).
+        // *after* the next source is read.
         self.emitter.mov64(Reg::X0, Reg::X1); // arg0 <- RCX
         self.emitter.mov64(Reg::X1, Reg::X2); // arg1 <- RDX
         self.emitter.mov64(Reg::X2, Reg::X8); // arg2 <- R8
@@ -539,6 +556,12 @@ impl<'a> Lifter<'a> {
         // BLR X16 — sets X30 (LR) to the next host PC. AAPCS64.
         self.emitter.blr(Reg::X16);
         self.emitter.ldp64_post(Reg::X29, Reg::X30, Reg::SP, 16);
+
+        // Restore the guest non-volatile regs in reverse push order.
+        self.emitter.ldp64_post(Reg::x(14), Reg::x(15), Reg::SP, 16);
+        self.emitter.ldp64_post(Reg::x(12), Reg::x(13), Reg::SP, 16);
+        self.emitter.ldp64_post(Reg::x(6), Reg::x(7), Reg::SP, 16);
+        self.emitter.ldp64_post(Reg::X3, Reg::x(5), Reg::SP, 16);
         Ok(())
     }
 
