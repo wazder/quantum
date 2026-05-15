@@ -450,27 +450,91 @@ fn process_shader_blob(
         Ok(c) => c,
         Err(_) => return E_NOTIMPL,
     };
-    // Transpile is best-effort; failure doesn't fail the call.
-    if let Some(chunk) = container.instructions_chunk() {
-        let payload = chunk.payload(bytes);
-        if let Some(tokens) = crate::dxbc::InstructionIter::from_payload_bytes(payload)
-        {
-            let _msl = crate::dxbc::emit_msl(&tokens);
-            // TODO: hand the MSL string to a Metal pipeline factory
-            // and stash the resulting pipeline pointer in the
-            // returned shader object. For now we just drop it.
-        }
-    }
+    // Hash the whole DXBC blob so repeated CreateVertexShader /
+    // CreatePixelShader calls with the same bytecode reuse the
+    // compiled MTLLibrary instead of recompiling (games create the
+    // same shaders every level load).
+    let hash = fnv1a64(bytes);
+    let library = shader_library_for(hash, &container, bytes);
+
     if !pp_out.is_null() {
-        // Reuse the device's static object so the guest has a
-        // non-null shader handle to stash; vtable methods on the
-        // shader object aren't exercised yet, so the static stub
-        // suffices.
+        // Hand back a ShaderObject wrapping the (possibly null)
+        // MTLLibrary + its hash. The guest stashes this pointer and
+        // later passes it to VS/PSSetShader; the draw path resolves
+        // the library from it.
+        let so = Box::new(ShaderObject {
+            vtbl: view_vtbl() as *const DeviceVtbl,
+            library,
+            dxbc_hash: hash,
+            _pad: [0; 232],
+        });
         unsafe {
-            *pp_out = device_instance() as *const Device as *mut c_void;
+            *pp_out = Box::into_raw(so) as *mut c_void;
         }
     }
     S_OK
+}
+
+/// Wrapper handed to the guest as ID3D11VertexShader* /
+/// ID3D11PixelShader*. First qword is an IUnknown-shaped vtable so a
+/// guest QI/AddRef/Release doesn't fault; the rest carries the
+/// compiled `MTLLibrary` (null if MSL didn't compile yet) + the DXBC
+/// hash for cache lookups.
+#[repr(C, align(16))]
+struct ShaderObject {
+    vtbl: *const DeviceVtbl,
+    library: *mut c_void,
+    dxbc_hash: u64,
+    _pad: [u8; 232],
+}
+
+unsafe impl Sync for ShaderObject {}
+unsafe impl Send for ShaderObject {}
+
+/// FNV-1a 64-bit. Tiny, dependency-free, good enough for keying the
+/// shader-library cache (collision risk is negligible for the few
+/// hundred distinct shaders a game ships).
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    h
+}
+
+/// Compile (or fetch a cached) MTLLibrary for the given DXBC blob.
+/// Returns null when Metal is unreachable or the emitted MSL doesn't
+/// compile yet (the emitter is still partial — callers tolerate a
+/// null library; the shader object is still handed back so game init
+/// proceeds).
+fn shader_library_for(
+    hash: u64,
+    container: &crate::dxbc::Container,
+    bytes: &[u8],
+) -> *mut c_void {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::sync::Mutex<std::collections::HashMap<u64, usize>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&lib) = cache.lock().unwrap().get(&hash) {
+        return lib as *mut c_void;
+    }
+    let mut library: *mut c_void = core::ptr::null_mut();
+    if let Some(chunk) = container.instructions_chunk() {
+        let payload = chunk.payload(bytes);
+        if let Some(tokens) = crate::dxbc::InstructionIter::from_payload_bytes(payload)
+            && let Ok(msl) = crate::dxbc::emit_msl(&tokens)
+        {
+            // Best-effort: emit_msl is still partial so most real
+            // shaders won't compile yet — that's expected and
+            // non-fatal. A null library just means the draw path
+            // falls back until the transpiler matures.
+            library = crate::cocoa::metal_new_library(&msl);
+        }
+    }
+    cache.lock().unwrap().insert(hash, library as usize);
+    library
 }
 
 /// Build the vtable at init time so the addresses of the stubs are

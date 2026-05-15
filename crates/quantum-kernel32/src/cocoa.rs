@@ -561,6 +561,64 @@ pub fn metal_new_command_queue() -> *mut c_void {
     msg_send_obj(device, sel("newCommandQueue\0"))
 }
 
+/// Compile Metal Shading Language source into an `MTLLibrary`. The
+/// transpiler (`dxbc::emit_msl`) produces the source; the d3d11 layer
+/// caches the returned library keyed by the DXBC hash so repeated
+/// CreateVertexShader / CreatePixelShader calls don't recompile.
+///
+/// Returns the retained `id<MTLLibrary>` on success, or null when
+/// Metal is unreachable OR the source fails to compile (a malformed
+/// shader leaves the caller free to fall back). `msl` need not be
+/// NUL-terminated — we copy it through an NSString.
+pub fn metal_new_library(msl: &str) -> *mut c_void {
+    let device = metal_default_device();
+    if device.is_null() {
+        return core::ptr::null_mut();
+    }
+    // NUL-terminate for stringWithUTF8String.
+    let mut buf = alloc::vec::Vec::with_capacity(msl.len() + 1);
+    buf.extend_from_slice(msl.as_bytes());
+    buf.push(0);
+    let src = nsstring_from_utf8(&buf);
+    if src.is_null() {
+        return core::ptr::null_mut();
+    }
+    // -[MTLDevice newLibraryWithSource:options:error:]
+    //   options = nil (default compile opts)
+    //   error   = NULL (we just observe a null return on failure)
+    let sel_new = sel("newLibraryWithSource:options:error:\0");
+    type F = unsafe extern "C" fn(Object, Sel, Object, Object, *mut Object) -> Object;
+    // SAFETY: device is the MTLDevice from MTLCreateSystemDefaultDevice;
+    // selector + arg shapes match the documented MTLDevice protocol.
+    let f: F = unsafe { core::mem::transmute(objc_msg_send_addr()) };
+    unsafe {
+        f(
+            device,
+            sel_new,
+            src,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
+    }
+}
+
+/// Look up a named function inside a compiled library:
+/// `-[MTLLibrary newFunctionWithName:]`. Returns the retained
+/// `id<MTLFunction>` or null.
+pub fn metal_library_function(library: *mut c_void, name: &str) -> *mut c_void {
+    if library.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut buf = alloc::vec::Vec::with_capacity(name.len() + 1);
+    buf.extend_from_slice(name.as_bytes());
+    buf.push(0);
+    let ns = nsstring_from_utf8(&buf);
+    if ns.is_null() {
+        return core::ptr::null_mut();
+    }
+    msg_send_obj1(library, sel("newFunctionWithName:\0"), ns)
+}
+
 /// `[queue commandBuffer]` — autoreleased MTLCommandBuffer.
 pub fn metal_command_buffer(queue: *mut c_void) -> *mut c_void {
     if queue.is_null() {
@@ -797,6 +855,38 @@ mod tests {
         // poke the device here (would touch the GPU stack) — just verify
         // the symbol resolves.
         let _ = metal_available();
+    }
+
+    #[test]
+    fn metal_new_library_compiles_valid_msl() {
+        if !metal_available() {
+            eprintln!("Metal unavailable; skipping");
+            return;
+        }
+        // A trivially valid Metal compute kernel. newLibraryWithSource
+        // is thread-safe (unlike AppKit) so this runs fine on the
+        // cargo-test worker thread.
+        let src = "#include <metal_stdlib>\n\
+                   using namespace metal;\n\
+                   kernel void k(device float* out [[buffer(0)]],\n\
+                                 uint i [[thread_position_in_grid]]) {\n\
+                     out[i] = float(i) * 2.0;\n\
+                   }\n";
+        let lib = metal_new_library(src);
+        assert!(!lib.is_null(), "valid MSL must compile to an MTLLibrary");
+        let f = metal_library_function(lib, "k");
+        assert!(!f.is_null(), "kernel `k` must resolve in the compiled library");
+        release(f);
+        release(lib);
+    }
+
+    #[test]
+    fn metal_new_library_rejects_garbage_msl() {
+        if !metal_available() {
+            return;
+        }
+        let lib = metal_new_library("this is definitely not valid metal {{{");
+        assert!(lib.is_null(), "garbage MSL must not yield a library");
     }
 
     #[test]
